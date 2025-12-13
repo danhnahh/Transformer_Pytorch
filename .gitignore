@@ -1,0 +1,5 @@
+.idea/
+data/*
+!data/.gitkeep
+checkpoints/*
+!checkpoints/.gitkeep
