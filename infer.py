@@ -152,8 +152,8 @@ def run(beam_size=5, max_samples=None):
     data_path + "tst2013.vi.txt"
     )
 
-    en_vocab_size = len(en_tokenizer.word_index) + 1
-    vi_vocab_size = len(vi_tokenizer.word_index) + 1
+    en_vocab_size = len(en_tokenizer)
+    vi_vocab_size = len(vi_tokenizer) 
 
     print("Loading model...")
     model = Transformer(
