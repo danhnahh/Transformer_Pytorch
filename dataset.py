@@ -1,6 +1,9 @@
 from pyvi.ViTokenizer import ViTokenizer
-from keras.src.legacy.preprocessing.text import Tokenizer
-from keras.src.utils import pad_sequences
+from transformers import PreTrainedTokenizerFast
+from tokenizers import Tokenizer as HFTokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
+from tokenizers.trainers import WordLevelTrainer
 from config import *
 
 
@@ -14,20 +17,36 @@ def load_data(en_file, vi_file):
 
 
 def get_tokenize(data, add_start_end=False):
-    # Khởi tạo Tokenizer
-    tokenizer = Tokenizer(filters='', oov_token=UNKNOWN_TOKEN)
-    if (add_start_end):
-        tokenizer.fit_on_texts([START_TOKEN, END_TOKEN] + data)
-    else:
-        tokenizer.fit_on_texts(data)
+    # Initialize tokenizer from transformers
+    tokenizer_obj = HFTokenizer(WordLevel(unk_token=UNKNOWN_TOKEN))
+    tokenizer_obj.pre_tokenizer = Whitespace()
+    
+    special_tokens = [PAD_TOKEN, UNKNOWN_TOKEN]
+    if add_start_end:
+        special_tokens.extend([START_TOKEN, END_TOKEN])
+    
+    trainer = WordLevelTrainer(
+        special_tokens=special_tokens,
+        min_frequency=1
+    )
+    
+    tokenizer_obj.train_from_iterator(data, trainer=trainer)
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=tokenizer_obj,
+        unk_token=UNKNOWN_TOKEN,
+        pad_token=PAD_TOKEN,
+        bos_token=START_TOKEN if add_start_end else None,
+        eos_token=END_TOKEN if add_start_end else None,
+    )
+    
     return data, tokenizer
 
 def get_tokenize_seq(en_data, vi_data, en_tokenizer, vi_tokenizer, max_sequence_length):
     en_data = [f"{START_TOKEN} {sentence} {END_TOKEN}" for sentence in en_data]
-    en_sequences = en_tokenizer.texts_to_sequences(en_data)
+    en_sequences = en_tokenizer(en_data, add_special_tokens=False)['input_ids']
 
     vi_data = [ViTokenizer.tokenize(sentence) for sentence in vi_data]
-    vi_sequences = vi_tokenizer.texts_to_sequences(vi_data)
+    vi_sequences = vi_tokenizer(vi_data, add_special_tokens=False)['input_ids']
 
     filtered_en = []
     filtered_vi = []
@@ -37,8 +56,12 @@ def get_tokenize_seq(en_data, vi_data, en_tokenizer, vi_tokenizer, max_sequence_
             filtered_en.append(en_sequences[i])
             filtered_vi.append(vi_sequences[i])
 
-    filtered_en = torch.tensor(pad_sequences(filtered_en, maxlen=max_sequence_length, padding='post'), dtype=torch.long)
-    filtered_vi = torch.tensor(pad_sequences(filtered_vi, maxlen=max_sequence_length, padding='post'), dtype=torch.long)
+    # Pad sequences manually
+    en_padded = [seq + [en_tokenizer.pad_token_id] * (max_sequence_length - len(seq)) for seq in filtered_en]
+    vi_padded = [seq + [vi_tokenizer.pad_token_id] * (max_sequence_length - len(seq)) for seq in filtered_vi]
+    
+    filtered_en = torch.tensor(en_padded, dtype=torch.long)
+    filtered_vi = torch.tensor(vi_padded, dtype=torch.long)
 
     return filtered_en, filtered_vi
 

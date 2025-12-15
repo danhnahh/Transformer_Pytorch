@@ -225,11 +225,20 @@ def main():
         data_path + "tst2013.vi.txt"
     )
 
+    # Debug mode: use only a fraction of data
+    if DEBUG_MODE:
+        train_size = int(len(all_train_sequences) * DEBUG_DATA_FRACTION)
+        val_size = int(len(all_val_sequences) * DEBUG_DATA_FRACTION)
+        all_train_sequences = all_train_sequences[:train_size]
+        all_val_sequences = all_val_sequences[:val_size]
+        print(f"\n⚠️ DEBUG MODE: Using {DEBUG_DATA_FRACTION*100:.0f}% of data")
+        print(f"Train samples: {len(all_train_sequences)}, Val samples: {len(all_val_sequences)}\n")
+
     train_batches = DataLoader(all_train_sequences, batch_size=BATCH_SIZE, shuffle=True)
     val_batches = DataLoader(all_val_sequences, batch_size=BATCH_SIZE, shuffle=False)
 
-    en_vocab_size = len(en_tokenizer.word_index) + 1
-    vi_vocab_size = len(vi_tokenizer.word_index) + 1
+    en_vocab_size = len(en_tokenizer)
+    vi_vocab_size = len(vi_tokenizer)
      
     print(f"\n{'='*60}")
     print("DATA INFO")
