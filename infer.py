@@ -15,8 +15,10 @@ def beam_search_decode(model, src, src_mask, trg_tokenizer, max_len=60,
 
     enc_src = model.encoder(src, src_mask)
 
-    start_token = trg_tokenizer.word_index[START_TOKEN]
-    end_token = trg_tokenizer.word_index[END_TOKEN]
+    # Use HuggingFace tokenizer's vocab
+    vocab = trg_tokenizer.get_vocab()
+    start_token = vocab[START_TOKEN]
+    end_token = vocab[END_TOKEN]
 
     beams = [(0.0, [start_token])]  # (score, [tokens])
     completed_beams = []
@@ -71,10 +73,11 @@ def translate_sentence(model, sentence, src_tokenizer, trg_tokenizer,
     sentence_tokenized = ViTokenizer.tokenize(sentence)
     sentences_with_tokens = f"{START_TOKEN} {sentence_tokenized} {END_TOKEN}"
 
-    src_indexes = src_tokenizer.texts_to_sequences([sentences_with_tokens])[0]
+    # Use HuggingFace tokenizer API
+    src_indexes = src_tokenizer(sentences_with_tokens, add_special_tokens=False)['input_ids']
 
-    if len (src_indexes) < max_len:
-        src_indexes = src_indexes + [PAD_TOKEN_POS] * (max_len - len(src_indexes))
+    if len(src_indexes) < max_len:
+        src_indexes = src_indexes + [src_tokenizer.pad_token_id] * (max_len - len(src_indexes))
     else:
         src_indexes = src_indexes[:max_len]
 
@@ -85,12 +88,14 @@ def translate_sentence(model, sentence, src_tokenizer, trg_tokenizer,
                                      max_len, beam_size, device)
     
     trg_tokens = []
-    index_to_word = {v: k for k, v in trg_tokenizer.word_index.items()}
+    # Use HuggingFace tokenizer's vocab
+    index_to_word = {v: k for k, v in trg_tokenizer.get_vocab().items()}
+    vocab = trg_tokenizer.get_vocab()
 
     for idx in trg_indexes:
-        if idx == trg_tokenizer.word_index.get(END_TOKEN):
+        if idx == vocab.get(END_TOKEN):
             break
-        if idx == trg_tokenizer.word_index.get(START_TOKEN):
+        if idx == vocab.get(START_TOKEN):
             continue
         if idx == PAD_TOKEN_POS:
             continue
