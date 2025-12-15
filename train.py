@@ -1,319 +1,206 @@
-import math
-import time
-import torch
-from torch import nn, optim
-from torch.utils.data import DataLoader
-from tqdm import tqdm
-from dataset import *
-from config import *
-from lr_scheduler import MyScheduler
-from models.transformer import Transformer
+from peft import get_peft_model, LoraConfig, TaskType
+from transformers import AutoModelForSeq2SeqLM, Trainer, DataCollatorForSeq2Seq, \
+    Seq2SeqTrainingArguments
 
-class Trainer:
-    def __init__(self, model, train_dataloader, val_dataloader=None,
-                 criterion=None, optimizer=None, scheduler=None,
-                 device='cuda', log_step=100, val_step=200,
-                 model_save_path='best_transformer.pt', gradient_clip=1.0):
-        self.device = device
-        self.model = model
-        self.train_dataloader = train_dataloader
-        self.val_dataloader = val_dataloader
-        self.criterion = criterion
-        self.optimizer = optimizer
-        self.scheduler = scheduler
-        self.log_step = log_step
-        self.val_step = val_step
-        self.model_save_path = model_save_path
-        self.gradient_clip = gradient_clip
-        self.best_val_loss = float('inf')
-        self.global_step = 0
+from load_data import get_tokenized_data, cache_path, tokenizer
 
-        self.model.to(self.device)
+# Load mô hình
+model = AutoModelForSeq2SeqLM.from_pretrained(
+    "facebook/nllb-200-distilled-1.3B",
+    cache_dir=cache_path,
+    use_safetensors=True,
+    dtype="bfloat16",
+    device_map="auto",
+)
 
-        total_params = sum(p.numel() for p in model.parameters())
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"\nModel parameters")
-        print(f"Total parameters: {total_params}")
-        print(f"Trainable parameters: {trainable_params}\n")
+# LoRA config
+# peft_config = LoraConfig(
+#     task_type=TaskType.SEQ_2_SEQ_LM,
+#     r=32,
+#     lora_alpha=64,
+#     lora_dropout=0.05,
+#     bias="none",
+#     target_modules=["q_proj", "k_proj", "v_proj", "o_proj"]
+# )
+# model = get_peft_model(model, peft_config)
 
-    def get_loss(self, batch):
-        src, trg = batch
-        src = src.to(self.device)
-        trg = trg.to(self.device)
+# Data collator
+data_collator = DataCollatorForSeq2Seq(
+    tokenizer=tokenizer,
+    model=model,
+    padding="longest",
+    label_pad_token_id=-100
+)
 
-        output = self.model(src, trg[:, :-1])
-        
+batch_size = 8
+gradient_accumulation_steps = 4
 
-        if torch.isnan(output).any():
-            print("⚠️ NaN in model outputs!")
-            return None, None
-        output_reshape = output.contiguous().view(-1, output.shape[-1])
-        trg = trg[:, 1:].contiguous().view(-1)
+# ============================================================
+# CHIA DATA THÀNH 3 PHẦN ĐỀU NHAU
+# ============================================================
+print("=" * 60)
+print("CHUẨN BỊ DATA: Chia thành 3 phần đều nhau")
+print("=" * 60)
 
-        loss = self.criterion(output_reshape, trg)
-        pred = output.argmax(dim=-1).view(-1)  # Lấy token có xác suất cao nhất
-        mask = (trg != PAD_TOKEN_POS)  # Bỏ qua token padding
-        correct = (pred == trg) & mask  # Đúng và không phải padding
-        accuracy = correct.sum().item() / (mask.sum().item() + 1e-8)
-        return loss, accuracy
-    
-    def train(self, num_epochs=10, accumulate_steps=1):
-        """Main training loop"""
-        total_batches = len(self.train_dataloader)
-        total_updates = (total_batches + accumulate_steps - 1) // accumulate_steps
-        
-        history = {
-            'train_loss': [],
-            'train_accuracy': [],
-            'val_loss': [],
-            'val_accuracy': []
-        }
-        
-        for epoch in range(num_epochs):
-            self.model.train()
-            running_loss = 0.0
-            running_accuracy = 0.0
-            
-            loop = tqdm(total=total_updates, 
-                       desc=f"Epoch {epoch + 1}/{num_epochs}", 
-                       unit="it", ncols=120)
-            
-            update_count = 0
-            
-            for batch_idx, batch in enumerate(self.train_dataloader):
-                self.global_step += 1
-                
-                # Get loss and accuracy
-                loss, accuracy = self.get_loss(batch)
-                
-                # Skip batch if NaN detected
-                if loss is None:
-                    print(f"Skipping batch {batch_idx}")
-                    continue
-                
-                # Gradient accumulation
-                loss = loss / accumulate_steps
-                loss.backward()
-                
-                # Gradient accumulation
-                if (batch_idx + 1) % accumulate_steps == 0 or (batch_idx + 1) == total_batches:
-                    # Gradient clipping
-                    grad_norm = 0.0  # Khởi tạo mặc định
-                    if self.gradient_clip > 0:
-                        grad_norm = torch.nn.utils.clip_grad_norm_(
-                            self.model.parameters(), self.gradient_clip)
-                        if isinstance(grad_norm, torch.Tensor):
-                            grad_norm = grad_norm.item()
-                    else:
-                        # Tính grad norm nếu không clip
-                        for p in self.model.parameters():
-                            if p.grad is not None:
-                                grad_norm += (p.grad.data.norm(2).item()) ** 2
-                        grad_norm = grad_norm ** 0.5
-                    
-                    # Check NaN/Inf gradients
-                    import math
-                    if math.isnan(grad_norm) or math.isinf(grad_norm):
-                        print("⚠️ NaN/Inf gradient detected! Skipping update.")
-                        self.optimizer.zero_grad()
-                        continue
-                    
-                    # Optimizer step
-                    self.optimizer.step()
-                    self.optimizer.zero_grad()
-                    
-                    if self.scheduler is not None:
-                        self.scheduler.step()
-                    
-                    running_loss += loss.item() * accumulate_steps
-                    running_accuracy += accuracy
-                    update_count += 1
-                    loop.update(1)
-                    
-                    # Logging
-                    if update_count % self.log_step == 0:
-                        avg_loss = running_loss / update_count
-                        avg_acc = running_accuracy / update_count
-                        current_lr = self.optimizer.param_groups[0]['lr']
-                        
-                        tqdm.write(
-                            f"Step {self.global_step} | "
-                            f"Loss: {avg_loss:.4f} | "
-                            f"Acc: {avg_acc:.4f} | "
-                            f"Grad: {grad_norm:.4f} | "
-                            f"LR: {current_lr:.6f}"
-                        )
-                    
-                    # Validation
-                    if self.val_dataloader is not None and update_count % self.val_step == 0:
-                        val_loss, val_acc = self.validate()
-                        tqdm.write(
-                            f"Validation | "
-                            f"Loss: {val_loss:.4f} | "
-                            f"Acc: {val_acc:.4f} | "
-                            f"PPL: {math.exp(val_loss):.3f}"
-                        )
-                        self.save_best_model(val_loss, val_acc)
-            
-            # End of epoch
-            epoch_train_loss = running_loss / update_count
-            epoch_train_acc = running_accuracy / update_count
-            history['train_loss'].append(epoch_train_loss)
-            history['train_accuracy'].append(epoch_train_acc)
-            
-            if self.val_dataloader is not None:
-                epoch_val_loss, epoch_val_acc = self.validate()
-                history['val_loss'].append(epoch_val_loss)
-                history['val_accuracy'].append(epoch_val_acc)
-                
-                print(f"\n{'='*60}")
-                print(f"Epoch {epoch + 1}/{num_epochs} Summary:")
-                print(f"  Train Loss: {epoch_train_loss:.4f} | Train Acc: {epoch_train_acc:.4f} | Train PPL: {math.exp(epoch_train_loss):.3f}")
-                print(f"  Val Loss: {epoch_val_loss:.4f} | Val Acc: {epoch_val_acc:.4f} | Val PPL: {math.exp(epoch_val_loss):.3f}")
-                print(f"{'='*60}\n")
-                
-                self.save_best_model(epoch_val_loss, epoch_val_acc)
-            else:
-                print(f"\nEpoch {epoch + 1}/{num_epochs}: Train Loss = {epoch_train_loss:.4f}\n")
-            
-            loop.close()
-        
-        return self.model, history
-    
-    def validate(self):
-        self.model.eval()
-        total_loss = 0.0
-        total_accuracy = 0.0
-        total_samples = 0
+# Load data EN->VI và VI->EN
+full_data_en2vi = get_tokenized_data('train_filtered', direction="en2vi")
+full_data_vi2en = get_tokenized_data('train_filtered', direction="vi2en")
 
-        with torch.no_grad():
-            for batch in tqdm(self.val_dataloader, desc="Validation", leave=False):
-                loss, accuracy = self.get_loss(batch)
+# Chia EN->VI thành 2 phần (cho giai đoạn 1 và 3)
+# Phần 1: 50% đầu, Phần 3: 50% sau
+total_en2vi = len(full_data_en2vi)
+half_en2vi = total_en2vi // 2
 
-                if loss is None:
-                    continue
-                batch_size = batch[0].size(0)
-                total_loss += loss.item() * batch_size
-                total_accuracy += accuracy * batch_size
-                total_samples += batch_size
-        self.model.train()
+part1_en2vi = full_data_en2vi.select(range(half_en2vi))
+part3_en2vi = full_data_en2vi.select(range(half_en2vi, total_en2vi))
 
-        if total_samples == 0:
-            return float('inf'), 0.0
-        
-        return total_loss / total_samples, total_accuracy / total_samples
-    
-    def save_best_model(self, val_loss, val_accuracy):
-        if val_loss < self.best_val_loss:
-            self.best_val_loss = val_loss
-            torch.save({
-                'model_state_dict': self.model.state_dict(),
-                'optimizer_state_dict': self.optimizer.state_dict(),
-                'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
-                'val_loss': val_loss,
-                'val_accuracy': val_accuracy,
-                'epoch': self.global_step
-            }, self.model_save_path)
-            print(f"Best model saved with val loss: {val_loss:.4f} and val acc: {val_accuracy:.4f}")
+# VI->EN dùng cho giai đoạn 2
+part2_vi2en = full_data_vi2en
 
-def main():
-    
-    en_tokenizer, vi_tokenizer, all_train_sequences, all_val_sequences = preprocess_data(
-        train_data_path + "train.en.txt",
-        train_data_path + "train.vi.txt",
-        data_path + "tst2013.en.txt", 
-        data_path + "tst2013.vi.txt"
-    )
+# Chia train/val cho từng phần (90/10)
+split1 = part1_en2vi.train_test_split(test_size=0.1, seed=42)
+train_data1 = split1['train']
+val_data1 = split1['test']
 
-    # Debug mode: use only a fraction of data
-    if DEBUG_MODE:
-        train_size = int(len(all_train_sequences) * DEBUG_DATA_FRACTION)
-        val_size = int(len(all_val_sequences) * DEBUG_DATA_FRACTION)
-        all_train_sequences = all_train_sequences[:train_size]
-        all_val_sequences = all_val_sequences[:val_size]
-        print(f"\n⚠️ DEBUG MODE: Using {DEBUG_DATA_FRACTION*100:.0f}% of data")
-        print(f"Train samples: {len(all_train_sequences)}, Val samples: {len(all_val_sequences)}\n")
+split2 = part2_vi2en.train_test_split(test_size=0.1, seed=42)
+train_data2 = split2['train']
+val_data2 = split2['test']
 
-    train_batches = DataLoader(all_train_sequences, batch_size=BATCH_SIZE, shuffle=True)
-    val_batches = DataLoader(all_val_sequences, batch_size=BATCH_SIZE, shuffle=False)
+split3 = part3_en2vi.train_test_split(test_size=0.1, seed=42)
+train_data3 = split3['train']
+val_data3 = split3['test']
 
-    en_vocab_size = len(en_tokenizer)
-    vi_vocab_size = len(vi_tokenizer)
-     
-    print(f"\n{'='*60}")
-    print("DATA INFO")
-    print(f"{'='*60}")
-    print(f"Train samples: {len(all_train_sequences)}")
-    print(f"Val samples: {len(all_val_sequences)}")
-    print(f"EN vocab size: {en_vocab_size}")
-    print(f"VI vocab size: {vi_vocab_size}")
+print(f"Giai đoạn 1 (EN->VI): {len(train_data1):,} train, {len(val_data1):,} val")
+print(f"Giai đoạn 2 (VI->EN): {len(train_data2):,} train, {len(val_data2):,} val")
+print(f"Giai đoạn 3 (EN->VI): {len(train_data3):,} train, {len(val_data3):,} val")
 
-    model = Transformer(
-        src_pad_idx=PAD_TOKEN_POS,
-        trg_pad_idx=PAD_TOKEN_POS,
-        d_model=D_MODEL,
-        inp_vocab_size=vi_vocab_size,
-        trg_vocab_size=en_vocab_size,
-        max_len=MAX_SEQ_LEN,
-        d_ff=D_FF,
-        num_heads=NUM_HEADS,
-        num_layers=NUM_LAYERS,
-        dropout=DROPOUT,
-        device=DEVICE
-    ).to(DEVICE)
+# ============================================================
+# GIAI ĐOẠN 1: EN -> VI (phần 1)
+# ============================================================
+print("=" * 60)
+print("GIAI ĐOẠN 1: EN -> VI")
+print("=" * 60)
 
-    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+training_args1 = Seq2SeqTrainingArguments(
+    per_device_train_batch_size=batch_size,
+    gradient_accumulation_steps=gradient_accumulation_steps,
+    num_train_epochs=2,
+    learning_rate=2e-5,  # LR cao nhất cho giai đoạn đầu
+    weight_decay=0.005,
+    output_dir="./lora-nllb-translation/stage1",
+    logging_steps=100,
+    logging_dir="./logs/stage1",
+    save_steps=2500,
+    save_total_limit=2,
+    lr_scheduler_type="cosine",
+    bf16=True,
+    tf32=True,
+    eval_strategy="steps",
+    eval_steps=2500,
+    report_to="tensorboard",
+    load_best_model_at_end=True,
+    warmup_ratio=0.1,
+    metric_for_best_model="loss",
+    greater_is_better=False,
+    label_names=["labels"]
+)
 
-    total_updates = ((len(train_batches) + GRADIENT_ACCUMULATION - 1) // 
-                    GRADIENT_ACCUMULATION) * EPOCHS 
+trainer1 = Trainer(
+    model=model,
+    args=training_args1,
+    train_dataset=train_data1,
+    eval_dataset=val_data1,
+    data_collator=data_collator,
+)
+trainer1.train()
+print("Hoàn thành giai đoạn 1!")
 
-    scheduler = MyScheduler(
-        optimizer, 
-        total_steps=total_updates,
-        scheduler_type='cosine',  # hoặc 'linear', 'exponential'
-        warmup_ratio=WARMUP_RATIO,         # 10% đầu là warmup
-        final_lr_ratio=FINAL_LR_RATIO 
-    )   
+# ============================================================
+# GIAI ĐOẠN 2: VI -> EN (phần 2)
+# ============================================================
+print("=" * 60)
+print("GIAI ĐOẠN 2: VI -> EN")
+print("=" * 60)
 
-    criterion = nn.CrossEntropyLoss(ignore_index=PAD_TOKEN_POS)
+training_args2 = Seq2SeqTrainingArguments(
+    per_device_train_batch_size=batch_size,
+    gradient_accumulation_steps=gradient_accumulation_steps,
+    num_train_epochs=2,
+    learning_rate=5e-6,  # LR giảm xuống
+    weight_decay=0.005,
+    output_dir="./lora-nllb-translation/stage2",
+    logging_steps=100,
+    logging_dir="./logs/stage2",
+    save_steps=2500,
+    save_total_limit=2,
+    lr_scheduler_type="cosine",
+    bf16=True,
+    tf32=True,
+    eval_strategy="steps",
+    eval_steps=2500,
+    report_to="tensorboard",
+    load_best_model_at_end=True,
+    warmup_ratio=0.05,  # Warmup ít hơn vì đã pretrain
+    metric_for_best_model="loss",
+    greater_is_better=False,
+    label_names=["labels"]
+)
 
-    print(f"\n{'='*60}")
-    print("TRAINING CONFIG")
-    print(f"{'='*60}")
-    print(f"Device: {DEVICE}")
-    print(f"Batch size: {BATCH_SIZE}")
-    print(f"Epochs: {EPOCHS}")
-    print(f"Learning rate: {LEARNING_RATE}")
-    print(f"Scheduler: cosine with warmup")
-    print(f"Total training steps: {total_updates}")
+trainer2 = Trainer(
+    model=model,
+    args=training_args2,
+    train_dataset=train_data2,
+    eval_dataset=val_data2,
+    data_collator=data_collator,
+)
+trainer2.train()
+print("Hoàn thành giai đoạn 2!")
 
-    trainer = Trainer(
-        model=model,
-        train_dataloader=train_batches,
-        val_dataloader=val_batches,
-        criterion=criterion,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        device=DEVICE,
-        log_step=BATCH_PRINT,
-        val_step=VAL_STEP,
-        model_save_path=f'{saved_model_path}best_transformer1.pt',
-        gradient_clip=CLIP
-    )
+# ============================================================
+# GIAI ĐOẠN 3: EN -> VI (phần 3 - data mới)
+# ============================================================
+print("=" * 60)
+print("GIAI ĐOẠN 3: EN -> VI (Fine-tune)")
+print("=" * 60)
 
-    print(f"\n{'='*60}")
-    print("START TRAINING")
-    print(f"{'='*60}\n")
+training_args3 = Seq2SeqTrainingArguments(
+    per_device_train_batch_size=batch_size,
+    gradient_accumulation_steps=gradient_accumulation_steps,
+    num_train_epochs=2,
+    learning_rate=1e-6,  # LR thấp nhất để fine-tune
+    weight_decay=0.005,
+    output_dir="./lora-nllb-translation/stage3",
+    logging_steps=100,
+    logging_dir="./logs/stage3",
+    save_steps=2500,
+    save_total_limit=2,
+    lr_scheduler_type="cosine",
+    bf16=True,
+    tf32=True,
+    eval_strategy="steps",
+    eval_steps=2500,
+    report_to="tensorboard",
+    load_best_model_at_end=True,
+    warmup_ratio=0.03,  # Warmup rất ít
+    metric_for_best_model="loss",
+    greater_is_better=False,
+    label_names=["labels"]
+)
 
-    trained_model, history = trainer.train(
-        num_epochs=EPOCHS, 
-        accumulate_steps=GRADIENT_ACCUMULATION
-    )
-    
-    print(f"\n{'='*60}")
-    print("TRAINING COMPLETED!")
-    print(f"{'='*60}")
-    print(f"Best validation loss: {trainer.best_val_loss:.4f}")
+trainer3 = Trainer(
+    model=model,
+    args=training_args3,
+    train_dataset=train_data3,  # Data EN->VI phần 3 (khác phần 1)
+    eval_dataset=val_data3,
+    data_collator=data_collator,
+)
+trainer3.train()
+print("Hoàn thành giai đoạn 3!")
 
-if __name__ == "__main__":
-    main()
+# Lưu model cuối cùng
+model.save_pretrained("./lora-nllb-translation/final")
+tokenizer.save_pretrained("./lora-nllb-translation/final")
+print("=" * 60)
+print("HOÀN THÀNH TRAINING 3 GIAI ĐOẠN!")
+print("Model đã lưu tại: ./lora-nllb-translation/final")
+print("=" * 60)

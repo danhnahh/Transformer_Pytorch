@@ -1,6 +1,6 @@
+
+.claude/
 .idea/
-data/*
-!data/.gitkeep
-checkpoints/*
-!checkpoints/.gitkeep
 __pycache__/
+data/
+result/
