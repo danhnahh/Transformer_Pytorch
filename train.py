@@ -9,13 +9,15 @@ from config import *
 from lr_scheduler import MyScheduler
 from models.transformer import Transformer
 from infer import translate_sentence
+import wandb
 
 class Trainer:
     def __init__(self, model, train_dataloader, val_dataloader=None,
                  criterion=None, optimizer=None, scheduler=None,
                  device='cuda', log_step=100, val_step=200,
                  model_save_path='best_transformer.pt', gradient_clip=1.0,
-                 src_tokenizer=None, trg_tokenizer=None, test_samples=None):
+                 src_tokenizer=None, trg_tokenizer=None, test_samples=None,
+                 use_wandb=False):
         self.device = device
         self.model = model
         self.train_dataloader = train_dataloader
@@ -32,6 +34,7 @@ class Trainer:
         self.src_tokenizer = src_tokenizer
         self.trg_tokenizer = trg_tokenizer
         self.test_samples = test_samples if test_samples else []
+        self.use_wandb = use_wandb
 
         self.model.to(self.device)
 
@@ -148,6 +151,17 @@ class Trainer:
                             f"Grad: {grad_norm:.4f} | "
                             f"LR: {current_lr:.6f}"
                         )
+                        
+                        # Log to wandb
+                        if self.use_wandb:
+                            wandb.log({
+                                'train/loss': avg_loss,
+                                'train/accuracy': avg_acc,
+                                'train/perplexity': math.exp(min(avg_loss, 20)),  # Cap to prevent overflow
+                                'train/grad_norm': grad_norm,
+                                'train/learning_rate': current_lr,
+                                'step': self.global_step
+                            })
                     
                     # Validation
                     if self.val_dataloader is not None and update_count % self.val_step == 0:
@@ -158,6 +172,16 @@ class Trainer:
                             f"Acc: {val_acc:.4f} | "
                             f"PPL: {math.exp(val_loss):.3f}"
                         )
+                        
+                        # Log to wandb
+                        if self.use_wandb:
+                            wandb.log({
+                                'val/loss': val_loss,
+                                'val/accuracy': val_acc,
+                                'val/perplexity': math.exp(min(val_loss, 20)),
+                                'step': self.global_step
+                            })
+                        
                         self.translate_samples(num_samples=3, beam_size=3)
                         self.save_best_model(val_loss, val_acc)
             
@@ -178,10 +202,31 @@ class Trainer:
                 print(f"  Val Loss: {epoch_val_loss:.4f} | Val Acc: {epoch_val_acc:.4f} | Val PPL: {math.exp(epoch_val_loss):.3f}")
                 print(f"{'='*60}\n")
                 
+                # Log epoch metrics to wandb
+                if self.use_wandb:
+                    wandb.log({
+                        'epoch': epoch + 1,
+                        'epoch/train_loss': epoch_train_loss,
+                        'epoch/train_accuracy': epoch_train_acc,
+                        'epoch/train_perplexity': math.exp(min(epoch_train_loss, 20)),
+                        'epoch/val_loss': epoch_val_loss,
+                        'epoch/val_accuracy': epoch_val_acc,
+                        'epoch/val_perplexity': math.exp(min(epoch_val_loss, 20)),
+                    })
+                
                 self.translate_samples(num_samples=3, beam_size=3)
                 self.save_best_model(epoch_val_loss, epoch_val_acc)
             else:
                 print(f"\nEpoch {epoch + 1}/{num_epochs}: Train Loss = {epoch_train_loss:.4f}\n")
+                
+                # Log epoch metrics to wandb
+                if self.use_wandb:
+                    wandb.log({
+                        'epoch': epoch + 1,
+                        'epoch/train_loss': epoch_train_loss,
+                        'epoch/train_accuracy': epoch_train_acc,
+                        'epoch/train_perplexity': math.exp(min(epoch_train_loss, 20)),
+                    })
             
             loop.close()
         
@@ -249,6 +294,40 @@ class Trainer:
             print(f"Best model saved with val loss: {val_loss:.4f} and val acc: {val_accuracy:.4f}")
 
 def main():
+    
+    # Determine dataset name for wandb run name
+    if USE_DATASET == 'huggingface':
+        dataset_name = HF_DATASET_NAME.split('/')[-1]  # Extract dataset name from path
+        print(f"Using Hugging Face dataset: {HF_DATASET_NAME}")
+    else:
+        dataset_name = 'IWSLT15'
+        print(f"Using local dataset: {data_path}")
+    
+    # Initialize wandb if enabled
+    if USE_WANDB:
+        wandb.init(
+            project=WANDB_PROJECT,
+            entity=WANDB_ENTITY,
+            name=dataset_name,
+            config={
+                'dataset': USE_DATASET,
+                'dataset_name': HF_DATASET_NAME if USE_DATASET == 'huggingface' else 'IWSLT15',
+                'max_seq_len': MAX_SEQ_LEN,
+                'num_layers': NUM_LAYERS,
+                'd_model': D_MODEL,
+                'd_ff': D_FF,
+                'num_heads': NUM_HEADS,
+                'dropout': DROPOUT,
+                'batch_size': BATCH_SIZE,
+                'learning_rate': LEARNING_RATE,
+                'epochs': EPOCHS,
+                'gradient_accumulation': GRADIENT_ACCUMULATION,
+                'vocab_size': VOCAB_SIZE,
+                'warmup_ratio': WARMUP_RATIO,
+                'weight_decay': WEIGHT_DECAY,
+            }
+        )
+        print(f"✓ Weights & Biases initialized with run name: {dataset_name}")
     
     # Load dataset based on config setting
     if USE_DATASET == 'huggingface':
@@ -353,7 +432,8 @@ def main():
         gradient_clip=CLIP,
         src_tokenizer=vi_tokenizer,
         trg_tokenizer=en_tokenizer,
-        test_samples=test_samples
+        test_samples=test_samples,
+        use_wandb=USE_WANDB
     )
 
     print(f"\n{'='*60}")
@@ -369,6 +449,11 @@ def main():
     print("TRAINING COMPLETED!")
     print(f"{'='*60}")
     print(f"Best validation loss: {trainer.best_val_loss:.4f}")
+    
+    # Finish wandb run
+    if USE_WANDB:
+        wandb.finish()
+        print("✓ Weights & Biases run finished")
 
 if __name__ == "__main__":
     main()

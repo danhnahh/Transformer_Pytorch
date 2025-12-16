@@ -13,7 +13,7 @@ import torch
 # 'local':       Uses IWSLT'15 dataset from data/archive/ (~133K samples)
 #                Requires manual data files in data/archive/IWSLT'15 en-vi/
 # ============================================
-USE_DATASET = 'huggingface'  # Change to 'local' to use IWSLT'15 dataset
+USE_DATASET = 'local'  # Change to 'local' to use IWSLT'15 dataset
 HF_DATASET_NAME = 'ncduy/mt-en-vi'
 
 # Local dataset paths (used when USE_DATASET = 'local')
@@ -57,6 +57,11 @@ FINAL_LR_RATIO = 0.05
 
 #infer
 BEAM_SIZE = 5
+
+# Weights & Biases
+USE_WANDB = True  # Set to False to disable wandb logging
+WANDB_PROJECT = 'vi-en-translation'  # wandb project name
+WANDB_ENTITY = None  # Set to your wandb username/team, or None for default
 
 UNKNOWN_TOKEN = '<unk>'
 PAD_TOKEN = '<pad>'
