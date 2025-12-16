@@ -250,23 +250,38 @@ class Trainer:
 
 def main():
     
-    en_tokenizer, vi_tokenizer, all_train_sequences, all_val_sequences = preprocess_data(
-        train_data_path + "train.vi.txt",
-        train_data_path + "train.en.txt",
-        data_path + "tst2013.vi.txt", 
-        data_path + "tst2013.en.txt",
-        vocab_size=VOCAB_SIZE
-    )
+    # Load dataset based on config setting
+    if USE_DATASET == 'huggingface':
+        print(f"Using Hugging Face dataset: {HF_DATASET_NAME}")
+        en_tokenizer, vi_tokenizer, all_train_sequences, all_val_sequences = preprocess_data(
+            vocab_size=VOCAB_SIZE,
+            use_huggingface=True,
+            hf_dataset_name=HF_DATASET_NAME
+        )
+        # Load test samples from HF dataset
+        _, _, test_dataset = load_data_from_huggingface(HF_DATASET_NAME)
+        test_src = [example['vi'] for example in test_dataset.select(range(5))]
+        test_trg = [example['en'] for example in test_dataset.select(range(5))]
+        test_samples = list(zip(test_src, test_trg))
+    else:
+        print(f"Using local dataset: {data_path}")
+        en_tokenizer, vi_tokenizer, all_train_sequences, all_val_sequences = preprocess_data(
+            train_src_path=train_data_path + "train.vi.txt",
+            train_trg_path=train_data_path + "train.en.txt",
+            val_src_path=data_path + "tst2013.vi.txt",
+            val_trg_path=data_path + "tst2013.en.txt",
+            vocab_size=VOCAB_SIZE,
+            use_huggingface=False
+        )
+        # Load test samples from local files
+        test_src, test_trg = load_data(
+            data_path + "tst2012.vi.txt",
+            data_path + "tst2012.en.txt"
+        )
+        test_samples = list(zip(test_src[:5], test_trg[:5]))
 
     train_batches = DataLoader(all_train_sequences, batch_size=BATCH_SIZE, shuffle=True)
     val_batches = DataLoader(all_val_sequences, batch_size=BATCH_SIZE, shuffle=False)
-
-    # Load test samples for translation showcase
-    test_src, test_trg = load_data(
-        data_path + "tst2012.vi.txt",
-        data_path + "tst2012.en.txt"
-    )
-    test_samples = list(zip(test_src[:5], test_trg[:5]))  # Keep first 5 samples
 
     # Get vocab sizes from SentencePiece tokenizers
     en_vocab_size = en_tokenizer.get_vocab_size()

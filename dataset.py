@@ -3,6 +3,7 @@ import re
 import unicodedata
 import sentencepiece as spm
 from pyvi.ViTokenizer import ViTokenizer
+from datasets import load_dataset
 from config import *
 
 # ============================================
@@ -224,6 +225,20 @@ class SentencePieceTokenizer:
 # DATA LOADING AND PREPROCESSING
 # ============================================
 
+def load_data_from_huggingface(dataset_name='ncduy/mt-en-vi'):
+    """Load dataset from Hugging Face.
+    
+    Args:
+        dataset_name: Name of the dataset on Hugging Face
+    
+    Returns:
+        Tuple of (train_dataset, val_dataset, test_dataset)
+    """
+    print(f"Loading dataset from Hugging Face: {dataset_name}")
+    dataset = load_dataset(dataset_name)
+    return dataset['train'], dataset['validation'], dataset['test']
+
+
 def load_data(src_file, trg_file):
     """Load source and target data from files."""
     with open(src_file, 'r', encoding='utf-8') as f:
@@ -318,18 +333,21 @@ def train_or_load_tokenizers(train_src_data, train_trg_data,
     return src_tokenizer, trg_tokenizer
 
 
-def preprocess_data(train_src_path, train_trg_path, val_src_path, val_trg_path,
-                    vocab_size=32000, force_train_tokenizer=False):
+def preprocess_data(train_src_path=None, train_trg_path=None, val_src_path=None, val_trg_path=None,
+                    vocab_size=32000, force_train_tokenizer=False, use_huggingface=True,
+                    hf_dataset_name='ncduy/mt-en-vi'):
     """
     Main preprocessing function with normalization + SentencePiece (spm32k, spm32k).
     
     Args:
-        train_src_path: Path to training source file (Vietnamese)
-        train_trg_path: Path to training target file (English)
-        val_src_path: Path to validation source file
-        val_trg_path: Path to validation target file
+        train_src_path: Path to training source file (Vietnamese) - optional if use_huggingface=True
+        train_trg_path: Path to training target file (English) - optional if use_huggingface=True
+        val_src_path: Path to validation source file - optional if use_huggingface=True
+        val_trg_path: Path to validation target file - optional if use_huggingface=True
         vocab_size: SentencePiece vocabulary size (default 32000)
         force_train_tokenizer: Force retraining tokenizers
+        use_huggingface: If True, load from Hugging Face dataset
+        hf_dataset_name: Name of Hugging Face dataset
     
     Returns:
         Tuple of (trg_tokenizer, src_tokenizer, train_sequences, val_sequences)
@@ -341,8 +359,16 @@ def preprocess_data(train_src_path, train_trg_path, val_src_path, val_trg_path,
     
     # Load raw data
     print("Loading data...")
-    train_src, train_trg = load_data(train_src_path, train_trg_path)
-    val_src, val_trg = load_data(val_src_path, val_trg_path)
+    if use_huggingface:
+        train_dataset, val_dataset, test_dataset = load_data_from_huggingface(hf_dataset_name)
+        # Extract Vietnamese and English sentences
+        train_src = [example['vi'] for example in train_dataset]
+        train_trg = [example['en'] for example in train_dataset]
+        val_src = [example['vi'] for example in val_dataset]
+        val_trg = [example['en'] for example in val_dataset]
+    else:
+        train_src, train_trg = load_data(train_src_path, train_trg_path)
+        val_src, val_trg = load_data(val_src_path, val_trg_path)
     
     print(f"Train samples: {len(train_src)}")
     print(f"Val samples: {len(val_src)}")

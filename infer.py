@@ -5,7 +5,7 @@ from models.transformer import Transformer
 from nltk.translate.bleu_score import corpus_bleu, sentence_bleu, SmoothingFunction
 from tqdm import tqdm
 from config import *
-from dataset import preprocess_data, load_data, normalize_text, SentencePieceTokenizer
+from dataset import preprocess_data, load_data, load_data_from_huggingface, normalize_text, SentencePieceTokenizer
 
 def beam_search_decode(model, src, src_mask, trg_tokenizer, max_len=60,
                        beam_size=5, device='cuda'):
@@ -148,13 +148,35 @@ def calculate_bleu_score(model, test_data, src_tokenizer, trg_tokenizer, device=
     return bleu_score, examples
 
 def run(beam_size=5, max_samples=None):
-    en_tokenizer, vi_tokenizer, all_train_sequences, all_val_sequences = preprocess_data(
-        train_data_path + "train.vi.txt", 
-        train_data_path + "train.en.txt",
-        data_path + "tst2013.vi.txt", 
-        data_path + "tst2013.en.txt",
-        vocab_size=VOCAB_SIZE
-    )
+    # Load dataset based on config setting
+    if USE_DATASET == 'huggingface':
+        print(f"Using Hugging Face dataset: {HF_DATASET_NAME}")
+        en_tokenizer, vi_tokenizer, all_train_sequences, all_val_sequences = preprocess_data(
+            vocab_size=VOCAB_SIZE,
+            use_huggingface=True,
+            hf_dataset_name=HF_DATASET_NAME
+        )
+        # Load test data from HF
+        _, _, test_dataset = load_data_from_huggingface(HF_DATASET_NAME)
+        test_src = [example['vi'] for example in test_dataset]
+        test_trg = [example['en'] for example in test_dataset]
+        test_data = list(zip(test_src, test_trg))
+    else:
+        print(f"Using local dataset: {test_data_path}")
+        en_tokenizer, vi_tokenizer, all_train_sequences, all_val_sequences = preprocess_data(
+            train_src_path=train_data_path + "train.vi.txt",
+            train_trg_path=train_data_path + "train.en.txt",
+            val_src_path=data_path + "tst2013.vi.txt",
+            val_trg_path=data_path + "tst2013.en.txt",
+            vocab_size=VOCAB_SIZE,
+            use_huggingface=False
+        )
+        # Load test data from local files
+        test_src, test_trg = load_data(
+            test_data_path + "tst2012.vi.txt",
+            test_data_path + "tst2012.en.txt"
+        )
+        test_data = list(zip(test_src, test_trg))
 
     en_vocab_size = en_tokenizer.get_vocab_size()
     vi_vocab_size = vi_tokenizer.get_vocab_size()
@@ -179,12 +201,6 @@ def run(beam_size=5, max_samples=None):
     checkpoint = torch.load(saved_model_path + 'best_transformer1.pt')
     model.load_state_dict(checkpoint['model_state_dict'])
     print(f"✓ Model loaded (Val Loss: {checkpoint['val_loss']:.4f})")
-
-    test_src, test_trg = load_data(
-        test_data_path + "tst2012.vi.txt",
-        test_data_path + "tst2012.en.txt"
-    )
-    test_data = list(zip(test_src, test_trg))
 
     bleu_score, examples = calculate_bleu_score(
         model, test_data, vi_tokenizer, en_tokenizer,
