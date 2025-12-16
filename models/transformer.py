@@ -4,14 +4,14 @@ from models.encoder import Encoder
 from models.decoder import Decoder
 
 class Transformer(nn.Module):
-    def __init__(self, src_pad_idx, trg_pad_idx, inp_vocab_size, trg_vocab_size, d_model, num_heads, max_len, d_ff, num_layers, dropout, device):
+    def __init__(self, src_pad_idx, trg_pad_idx, inp_vocab_size, trg_vocab_size, d_model, num_heads, max_len, d_ff, num_layers, dropout, device, use_alignment=True):
         super(Transformer, self).__init__()
         self.src_pad_idx = src_pad_idx
         self.trg_pad_idx = trg_pad_idx
         self.device = device
 
         self.encoder = Encoder(inp_vocab_size, max_len, d_model, d_ff, num_heads, num_layers, dropout, device)
-        self.decoder = Decoder(trg_vocab_size, max_len, d_model, d_ff, num_heads, num_layers, dropout, device)
+        self.decoder = Decoder(trg_vocab_size, max_len, d_model, d_ff, num_heads, num_layers, dropout, device, use_alignment=use_alignment)
 
     def forward(self, src, trg):
         src_mask = self.make_src_mask(src)

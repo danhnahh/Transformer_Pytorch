@@ -2,12 +2,10 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 from models.transformer import Transformer
-from pyvi.ViTokenizer import ViTokenizer
-import numpy as np
 from nltk.translate.bleu_score import corpus_bleu, sentence_bleu, SmoothingFunction
 from tqdm import tqdm
 from config import *
-from dataset import *
+from dataset import preprocess_data, load_data, normalize_text, SentencePieceTokenizer
 
 def beam_search_decode(model, src, src_mask, trg_tokenizer, max_len=60,
                        beam_size=5, device='cuda'):
@@ -15,8 +13,9 @@ def beam_search_decode(model, src, src_mask, trg_tokenizer, max_len=60,
 
     enc_src = model.encoder(src, src_mask)
 
-    start_token = trg_tokenizer.word_index[START_TOKEN]
-    end_token = trg_tokenizer.word_index[END_TOKEN]
+    # Use SentencePiece token IDs
+    start_token = trg_tokenizer.bos_id
+    end_token = trg_tokenizer.eos_id
 
     beams = [(0.0, [start_token])]  # (score, [tokens])
     completed_beams = []
@@ -65,16 +64,31 @@ def beam_search_decode(model, src, src_mask, trg_tokenizer, max_len=60,
     return best_beam[1]
 
 def translate_sentence(model, sentence, src_tokenizer, trg_tokenizer, 
-                      device='cuda',max_len=60, beam_size=5):
+                      device='cuda', max_len=60, beam_size=5):
+    """
+    Translate a sentence using the model with SentencePiece tokenization.
+    
+    Args:
+        model: Transformer model
+        sentence: Input sentence (Vietnamese)
+        src_tokenizer: Source SentencePiece tokenizer
+        trg_tokenizer: Target SentencePiece tokenizer
+        device: Device to use
+        max_len: Maximum sequence length
+        beam_size: Beam search width
+    
+    Returns:
+        Translated sentence (English)
+    """
     model.eval()
 
-    sentence_tokenized = ViTokenizer.tokenize(sentence)
-    sentences_with_tokens = f"{START_TOKEN} {sentence_tokenized} {END_TOKEN}"
+    # Normalize and encode with SentencePiece
+    sentence_norm = normalize_text(sentence, lang='vi')
+    src_indexes = src_tokenizer.encode(sentence_norm, add_bos=True, add_eos=True)
 
-    src_indexes = src_tokenizer.texts_to_sequences([sentences_with_tokens])[0]
-
-    if len (src_indexes) < max_len:
-        src_indexes = src_indexes + [PAD_TOKEN_POS] * (max_len - len(src_indexes))
+    # Pad or truncate
+    if len(src_indexes) < max_len:
+        src_indexes = src_indexes + [src_tokenizer.pad_id] * (max_len - len(src_indexes))
     else:
         src_indexes = src_indexes[:max_len]
 
@@ -84,21 +98,10 @@ def translate_sentence(model, sentence, src_tokenizer, trg_tokenizer,
     trg_indexes = beam_search_decode(model, src_tensor, src_mask, trg_tokenizer, 
                                      max_len, beam_size, device)
     
-    trg_tokens = []
-    index_to_word = {v: k for k, v in trg_tokenizer.word_index.items()}
-
-    for idx in trg_indexes:
-        if idx == trg_tokenizer.word_index.get(END_TOKEN):
-            break
-        if idx == trg_tokenizer.word_index.get(START_TOKEN):
-            continue
-        if idx == PAD_TOKEN_POS:
-            continue
-
-        word = index_to_word.get(idx, UNKNOWN_TOKEN)
-        trg_tokens.append(word)
+    # Decode with SentencePiece (skip special tokens)
+    translation = trg_tokenizer.decode(trg_indexes, skip_special_tokens=True)
     
-    return ' '.join(trg_tokens)
+    return translation
 
 def calculate_bleu_score(model, test_data, src_tokenizer, trg_tokenizer, device='cuda',
                          beam_size=5, max_samples=None):
@@ -146,19 +149,21 @@ def calculate_bleu_score(model, test_data, src_tokenizer, trg_tokenizer, device=
 
 def run(beam_size=5, max_samples=None):
     en_tokenizer, vi_tokenizer, all_train_sequences, all_val_sequences = preprocess_data(
-    train_data_path + "train.en.txt", 
-    train_data_path + "train.vi.txt",
-    data_path + "tst2013.en.txt", 
-    data_path + "tst2013.vi.txt"
+        train_data_path + "train.vi.txt", 
+        train_data_path + "train.en.txt",
+        data_path + "tst2013.vi.txt", 
+        data_path + "tst2013.en.txt",
+        vocab_size=VOCAB_SIZE
     )
 
-    en_vocab_size = len(en_tokenizer.word_index) + 1
-    vi_vocab_size = len(vi_tokenizer.word_index) + 1
+    en_vocab_size = en_tokenizer.get_vocab_size()
+    vi_vocab_size = vi_tokenizer.get_vocab_size()
+    pad_token_id = vi_tokenizer.pad_id
 
     print("Loading model...")
     model = Transformer(
-        src_pad_idx=PAD_TOKEN_POS,
-        trg_pad_idx=PAD_TOKEN_POS,
+        src_pad_idx=pad_token_id,
+        trg_pad_idx=pad_token_id,
         d_model=D_MODEL,
         inp_vocab_size=vi_vocab_size,
         trg_vocab_size=en_vocab_size,
@@ -167,7 +172,8 @@ def run(beam_size=5, max_samples=None):
         num_heads=NUM_HEADS,
         num_layers=NUM_LAYERS,
         dropout=DROPOUT,
-        device=DEVICE
+        device=DEVICE,
+        use_alignment=True  # Transformer-Align: combines dot-product and additive attention
     ).to(DEVICE)
 
     checkpoint = torch.load(saved_model_path + 'best_transformer1.pt')

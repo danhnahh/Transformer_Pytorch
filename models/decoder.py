@@ -1,17 +1,18 @@
 from torch import nn
 
-from models.attention import MultiHeadAttention
+from models.attention import MultiHeadAttention, MultiHeadAlignmentAttention
 from models.embedding import *
 from config import *
 
 class Decoder_Layer(nn.Module):
-    def __init__(self, d_model, d_ff, num_heads, dropout):
+    def __init__(self, d_model, d_ff, num_heads, dropout, use_alignment=True):
         super(Decoder_Layer, self).__init__()
         self.self_attn = MultiHeadAttention(d_model, num_heads)
         self.norm1 = nn.LayerNorm(d_model, eps=EPS)
         self.dropout1 = nn.Dropout(dropout)
 
-        self.enc_dec_attn = MultiHeadAttention(d_model, num_heads)
+        # Use alignment attention for encoder-decoder attention
+        self.enc_dec_attn = MultiHeadAlignmentAttention(d_model, num_heads, use_alignment=use_alignment)
         self.norm2 = nn.LayerNorm(d_model, eps=EPS)
         self.dropout2 = nn.Dropout(dropout)
 
@@ -29,7 +30,7 @@ class Decoder_Layer(nn.Module):
         x = self.norm1(_x + x)
 
         if enc_out is not None:
-            # 3. compute encoder - decoder attention
+            # 3. compute encoder - decoder attention (with alignment)
             _x = x
             x = self.enc_dec_attn(x, enc_out, enc_out, mask=src_mask)
 
@@ -48,10 +49,13 @@ class Decoder_Layer(nn.Module):
         return x
 
 class Decoder(nn.Module):
-    def __init__(self, trg_vocab_size, max_len, d_model, d_ff, num_heads, num_layers, dropout, device):
+    def __init__(self, trg_vocab_size, max_len, d_model, d_ff, num_heads, num_layers, dropout, device, use_alignment=True):
         super(Decoder, self).__init__()
         self.embedding = TransformerEmbedding(trg_vocab_size, d_model, max_len, dropout, device)
-        self.layers = nn.ModuleList([Decoder_Layer(d_model, d_ff, num_heads, dropout) for i in range(num_layers)])
+        self.layers = nn.ModuleList([
+            Decoder_Layer(d_model, d_ff, num_heads, dropout, use_alignment=use_alignment) 
+            for i in range(num_layers)
+        ])
         self.linear = nn.Linear(d_model, trg_vocab_size)
 
     def forward(self, trg, enc_src, trg_mask, src_mask):

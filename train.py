@@ -8,12 +8,14 @@ from dataset import *
 from config import *
 from lr_scheduler import MyScheduler
 from models.transformer import Transformer
+from infer import translate_sentence
 
 class Trainer:
     def __init__(self, model, train_dataloader, val_dataloader=None,
                  criterion=None, optimizer=None, scheduler=None,
                  device='cuda', log_step=100, val_step=200,
-                 model_save_path='best_transformer.pt', gradient_clip=1.0):
+                 model_save_path='best_transformer.pt', gradient_clip=1.0,
+                 src_tokenizer=None, trg_tokenizer=None, test_samples=None):
         self.device = device
         self.model = model
         self.train_dataloader = train_dataloader
@@ -27,6 +29,9 @@ class Trainer:
         self.gradient_clip = gradient_clip
         self.best_val_loss = float('inf')
         self.global_step = 0
+        self.src_tokenizer = src_tokenizer
+        self.trg_tokenizer = trg_tokenizer
+        self.test_samples = test_samples if test_samples else []
 
         self.model.to(self.device)
 
@@ -52,7 +57,7 @@ class Trainer:
 
         loss = self.criterion(output_reshape, trg)
         pred = output.argmax(dim=-1).view(-1)  # Lấy token có xác suất cao nhất
-        mask = (trg != PAD_TOKEN_POS)  # Bỏ qua token padding
+        mask = (trg != self.model.trg_pad_idx)  # Bỏ qua token padding
         correct = (pred == trg) & mask  # Đúng và không phải padding
         accuracy = correct.sum().item() / (mask.sum().item() + 1e-8)
         return loss, accuracy
@@ -153,6 +158,7 @@ class Trainer:
                             f"Acc: {val_acc:.4f} | "
                             f"PPL: {math.exp(val_loss):.3f}"
                         )
+                        self.translate_samples(num_samples=3, beam_size=3)
                         self.save_best_model(val_loss, val_acc)
             
             # End of epoch
@@ -172,6 +178,7 @@ class Trainer:
                 print(f"  Val Loss: {epoch_val_loss:.4f} | Val Acc: {epoch_val_acc:.4f} | Val PPL: {math.exp(epoch_val_loss):.3f}")
                 print(f"{'='*60}\n")
                 
+                self.translate_samples(num_samples=3, beam_size=3)
                 self.save_best_model(epoch_val_loss, epoch_val_acc)
             else:
                 print(f"\nEpoch {epoch + 1}/{num_epochs}: Train Loss = {epoch_train_loss:.4f}\n")
@@ -203,6 +210,31 @@ class Trainer:
         
         return total_loss / total_samples, total_accuracy / total_samples
     
+    def translate_samples(self, num_samples=3, beam_size=3):
+        """Translate sample sentences and display them"""
+        if not self.test_samples or not self.src_tokenizer or not self.trg_tokenizer:
+            return
+        
+        print(f"\n{'='*80}")
+        print("TRANSLATION SAMPLES")
+        print(f"{'='*80}")
+        
+        samples_to_show = min(num_samples, len(self.test_samples))
+        for i in range(samples_to_show):
+            src_text, ref_text = self.test_samples[i]
+            
+            translation = translate_sentence(
+                self.model, src_text, self.src_tokenizer, self.trg_tokenizer,
+                self.device, max_len=MAX_SEQ_LEN, beam_size=beam_size
+            )
+            
+            print(f"\nSample {i+1}:")
+            print(f"  Source:      {src_text}")
+            print(f"  Reference:   {ref_text}")
+            print(f"  Translation: {translation}")
+        
+        print(f"{'='*80}\n")
+    
     def save_best_model(self, val_loss, val_accuracy):
         if val_loss < self.best_val_loss:
             self.best_val_loss = val_loss
@@ -219,17 +251,29 @@ class Trainer:
 def main():
     
     en_tokenizer, vi_tokenizer, all_train_sequences, all_val_sequences = preprocess_data(
-        train_data_path + "train.en.txt",
         train_data_path + "train.vi.txt",
-        data_path + "tst2013.en.txt", 
-        data_path + "tst2013.vi.txt"
+        train_data_path + "train.en.txt",
+        data_path + "tst2013.vi.txt", 
+        data_path + "tst2013.en.txt",
+        vocab_size=VOCAB_SIZE
     )
 
     train_batches = DataLoader(all_train_sequences, batch_size=BATCH_SIZE, shuffle=True)
     val_batches = DataLoader(all_val_sequences, batch_size=BATCH_SIZE, shuffle=False)
 
-    en_vocab_size = len(en_tokenizer.word_index) + 1
-    vi_vocab_size = len(vi_tokenizer.word_index) + 1
+    # Load test samples for translation showcase
+    test_src, test_trg = load_data(
+        data_path + "tst2012.vi.txt",
+        data_path + "tst2012.en.txt"
+    )
+    test_samples = list(zip(test_src[:5], test_trg[:5]))  # Keep first 5 samples
+
+    # Get vocab sizes from SentencePiece tokenizers
+    en_vocab_size = en_tokenizer.get_vocab_size()
+    vi_vocab_size = vi_tokenizer.get_vocab_size()
+    
+    # Pad token ID for SentencePiece (we use 3)
+    pad_token_id = vi_tokenizer.pad_id
      
     print(f"\n{'='*60}")
     print("DATA INFO")
@@ -238,10 +282,11 @@ def main():
     print(f"Val samples: {len(all_val_sequences)}")
     print(f"EN vocab size: {en_vocab_size}")
     print(f"VI vocab size: {vi_vocab_size}")
+    print(f"Pad token ID: {pad_token_id}")
 
     model = Transformer(
-        src_pad_idx=PAD_TOKEN_POS,
-        trg_pad_idx=PAD_TOKEN_POS,
+        src_pad_idx=pad_token_id,
+        trg_pad_idx=pad_token_id,
         d_model=D_MODEL,
         inp_vocab_size=vi_vocab_size,
         trg_vocab_size=en_vocab_size,
@@ -250,7 +295,8 @@ def main():
         num_heads=NUM_HEADS,
         num_layers=NUM_LAYERS,
         dropout=DROPOUT,
-        device=DEVICE
+        device=DEVICE,
+        use_alignment=True  # Transformer-Align: combines dot-product and additive attention
     ).to(DEVICE)
 
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
@@ -266,7 +312,7 @@ def main():
         final_lr_ratio=FINAL_LR_RATIO 
     )   
 
-    criterion = nn.CrossEntropyLoss(ignore_index=PAD_TOKEN_POS)
+    criterion = nn.CrossEntropyLoss(ignore_index=pad_token_id)
 
     print(f"\n{'='*60}")
     print("TRAINING CONFIG")
@@ -289,7 +335,10 @@ def main():
         log_step=BATCH_PRINT,
         val_step=VAL_STEP,
         model_save_path=f'{saved_model_path}best_transformer1.pt',
-        gradient_clip=CLIP
+        gradient_clip=CLIP,
+        src_tokenizer=vi_tokenizer,
+        trg_tokenizer=en_tokenizer,
+        test_samples=test_samples
     )
 
     print(f"\n{'='*60}")

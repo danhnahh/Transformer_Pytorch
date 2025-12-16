@@ -1,0 +1,12 @@
+[project]
+name = "transformer-pytorch"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "tensorflow>=2.20.0",
+    "sentencepiece>=0.1.99",
+    "tqdm>=4.65.0",
+    "nltk>=3.8.0",
+]
