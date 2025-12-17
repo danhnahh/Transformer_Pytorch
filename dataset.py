@@ -10,13 +10,14 @@ from config import *
 # TEXT NORMALIZATION
 # ============================================
 
-def normalize_text(text, lang='en'):
+def normalize_text(text, lang='en', lowercase=None):
     """
-    Normalize text with unicode normalization, lowercasing, and cleaning.
+    Normalize text with unicode normalization, optional lowercasing, and cleaning.
     
     Args:
         text: Input text string
         lang: Language code ('en' or 'vi')
+        lowercase: Whether to lowercase text (defaults to config.LOWERCASE_TEXT)
     
     Returns:
         Normalized text string
@@ -27,8 +28,11 @@ def normalize_text(text, lang='en'):
     else:
         text = unicodedata.normalize('NFKC', text)
     
-    # Lowercase
-    text = text.lower()
+    # Lowercase (optional)
+    if lowercase is None:
+        lowercase = LOWERCASE_TEXT
+    if lowercase:
+        text = text.lower()
     
     # Remove extra whitespace
     text = ' '.join(text.split())
@@ -47,9 +51,9 @@ def normalize_text(text, lang='en'):
     return text
 
 
-def normalize_batch(texts, lang='en'):
+def normalize_batch(texts, lang='en', lowercase=None):
     """Normalize a batch of texts."""
-    return [normalize_text(t, lang) for t in texts]
+    return [normalize_text(t, lang, lowercase) for t in texts]
 
 
 # ============================================

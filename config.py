@@ -13,7 +13,7 @@ import torch
 # 'local':       Uses IWSLT'15 dataset from data/archive/ (~133K samples)
 #                Requires manual data files in data/archive/IWSLT'15 en-vi/
 # ============================================
-USE_DATASET = 'local'  # Change to 'local' to use IWSLT'15 dataset
+USE_DATASET = 'huggingface'  # Change to 'local' to use IWSLT'15 dataset
 HF_DATASET_NAME = 'ncduy/mt-en-vi'
 
 # Local dataset paths (used when USE_DATASET = 'local')
@@ -29,7 +29,7 @@ MAX_SEQ_LEN =  80 #60  # Độ dài tối đa của câu
 
 # Huấn luyện mô hình
 NUM_LAYERS = 6
-D_MODEL = 384   
+D_MODEL = 512
 D_FF = 2048
 EPS = 1e-3
 BATCH_SIZE = 128 #164 * 2
@@ -39,6 +39,9 @@ DROPOUT = 0.1
 CLIP = 1.0
 BATCH_PRINT = 50 #100
 VOCAB_SIZE = 32000
+
+# Text preprocessing
+LOWERCASE_TEXT = False  # Set to True to train on lowercase text only
 
 #Learning rate
 LEARNING_RATE = 5e-4 # 3e-4
