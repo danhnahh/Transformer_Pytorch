@@ -38,8 +38,8 @@ def normalize_text(text, lang='en', lowercase=None):
     text = ' '.join(text.split())
     
     # Remove special characters but keep punctuation
-    # Keep Vietnamese diacritics and common punctuation
-    text = re.sub(r'[^\w\s\u00C0-\u024F\u1E00-\u1EFF.,!?;:\'\"-()]', ' ', text)
+    # Keep Vietnamese diacritics and common punctuation (including hyphens, slashes, etc.)
+    text = re.sub(r'[^\w\s\u00C0-\u024F\u1E00-\u1EFF.,!?;:\'\"\-()/%&@#*+=/]', ' ', text)
     
     # Normalize quotes and apostrophes
     text = text.replace('"', '"').replace('"', '"')
