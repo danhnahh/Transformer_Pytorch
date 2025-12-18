@@ -254,6 +254,12 @@ def main():
     try:
         model.load_state_dict(checkpoint['model_state_dict'])
         print("✓ Pretrained weights loaded successfully")
+        
+        # Free memory: delete checkpoint to avoid OOM
+        del checkpoint
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        print("✓ Checkpoint memory freed")
     except Exception as e:
         print(f"✗ Error loading pretrained weights: {e}")
         print("  Make sure the model architecture matches the checkpoint")

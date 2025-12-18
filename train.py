@@ -1,5 +1,6 @@
 import math
 import time
+import argparse
 import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader
@@ -11,13 +12,33 @@ from models.transformer import Transformer
 from infer import translate_sentence
 import wandb
 
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description='Train Vietnamese-English translation model')
+    
+    parser.add_argument(
+        '--resume',
+        type=str,
+        default=None,
+        help='Path to checkpoint to resume training from (e.g., checkpoints/best_transformer1.pt)'
+    )
+    
+    parser.add_argument(
+        '--epochs',
+        type=int,
+        default=None,
+        help='Override number of epochs from config'
+    )
+    
+    return parser.parse_args()
+
 class Trainer:
     def __init__(self, model, train_dataloader, val_dataloader=None,
                  criterion=None, optimizer=None, scheduler=None,
                  device='cuda', log_step=100, val_step=200,
                  model_save_path='best_transformer.pt', gradient_clip=1.0,
                  src_tokenizer=None, trg_tokenizer=None, test_samples=None,
-                 use_wandb=False):
+                 use_wandb=False, start_epoch=0):
         self.device = device
         self.model = model
         self.train_dataloader = train_dataloader
@@ -31,6 +52,7 @@ class Trainer:
         self.gradient_clip = gradient_clip
         self.best_val_loss = float('inf')
         self.global_step = 0
+        self.start_epoch = start_epoch
         self.src_tokenizer = src_tokenizer
         self.trg_tokenizer = trg_tokenizer
         self.test_samples = test_samples if test_samples else []
@@ -77,13 +99,13 @@ class Trainer:
             'val_accuracy': []
         }
         
-        for epoch in range(num_epochs):
+        for epoch in range(self.start_epoch, self.start_epoch + num_epochs):
             self.model.train()
             running_loss = 0.0
             running_accuracy = 0.0
             
             loop = tqdm(total=total_updates, 
-                       desc=f"Epoch {epoch + 1}/{num_epochs}", 
+                       desc=f"Epoch {epoch + 1}/{self.start_epoch + num_epochs}", 
                        unit="it", ncols=120)
             
             update_count = 0
@@ -197,7 +219,7 @@ class Trainer:
                 history['val_accuracy'].append(epoch_val_acc)
                 
                 print(f"\n{'='*60}")
-                print(f"Epoch {epoch + 1}/{num_epochs} Summary:")
+                print(f"Epoch {epoch + 1}/{self.start_epoch + num_epochs} Summary:")
                 print(f"  Train Loss: {epoch_train_loss:.4f} | Train Acc: {epoch_train_acc:.4f} | Train PPL: {math.exp(epoch_train_loss):.3f}")
                 print(f"  Val Loss: {epoch_val_loss:.4f} | Val Acc: {epoch_val_acc:.4f} | Val PPL: {math.exp(epoch_val_loss):.3f}")
                 print(f"{'='*60}\n")
@@ -217,7 +239,7 @@ class Trainer:
                 self.translate_samples(num_samples=3, beam_size=3)
                 self.save_best_model(epoch_val_loss, epoch_val_acc)
             else:
-                print(f"\nEpoch {epoch + 1}/{num_epochs}: Train Loss = {epoch_train_loss:.4f}\n")
+                print(f"\nEpoch {epoch + 1}/{self.start_epoch + num_epochs}: Train Loss = {epoch_train_loss:.4f}\n")
                 
                 # Log epoch metrics to wandb
                 if self.use_wandb:
@@ -294,6 +316,10 @@ class Trainer:
             print(f"Best model saved with val loss: {val_loss:.4f} and val acc: {val_accuracy:.4f}")
 
 def main():
+    args = parse_args()
+    
+    # Override epochs if specified
+    epochs = args.epochs if args.epochs is not None else EPOCHS
     
     # Determine dataset name for wandb run name
     if USE_DATASET == 'huggingface':
@@ -303,12 +329,39 @@ def main():
         dataset_name = 'IWSLT15'
         print(f"Using local dataset: {data_path}")
     
+    # Check if resuming from checkpoint
+    resume_checkpoint = None
+    start_epoch = 0
+    if args.resume:
+        print(f"\n{'='*60}")
+        print("RESUMING FROM CHECKPOINT")
+        print(f"{'='*60}")
+        print(f"Checkpoint: {args.resume}")
+        try:
+            resume_checkpoint = torch.load(args.resume, map_location=DEVICE)
+            print(f"✓ Checkpoint loaded successfully")
+            if 'epoch' in resume_checkpoint:
+                # Estimate epoch from global steps
+                print(f"  Checkpoint step: {resume_checkpoint['epoch']}")
+            if 'val_loss' in resume_checkpoint:
+                print(f"  Checkpoint validation loss: {resume_checkpoint['val_loss']:.4f}")
+            if 'val_accuracy' in resume_checkpoint:
+                print(f"  Checkpoint validation accuracy: {resume_checkpoint['val_accuracy']:.4f}")
+        except FileNotFoundError:
+            print(f"✗ Checkpoint not found: {args.resume}")
+            exit(1)
+        except Exception as e:
+            print(f"✗ Error loading checkpoint: {e}")
+            exit(1)
+    
     # Initialize wandb if enabled
     if USE_WANDB:
+        run_name = f"{dataset_name}-resume" if args.resume else dataset_name
         wandb.init(
             project=WANDB_PROJECT,
             entity=WANDB_ENTITY,
-            name=dataset_name,
+            name=run_name,
+            resume='allow' if args.resume else False,
             config={
                 'dataset': USE_DATASET,
                 'dataset_name': HF_DATASET_NAME if USE_DATASET == 'huggingface' else 'IWSLT15',
@@ -320,14 +373,15 @@ def main():
                 'dropout': DROPOUT,
                 'batch_size': BATCH_SIZE,
                 'learning_rate': LEARNING_RATE,
-                'epochs': EPOCHS,
+                'epochs': epochs,
                 'gradient_accumulation': GRADIENT_ACCUMULATION,
                 'vocab_size': VOCAB_SIZE,
                 'warmup_ratio': WARMUP_RATIO,
                 'weight_decay': WEIGHT_DECAY,
+                'resume': args.resume is not None,
             }
         )
-        print(f"✓ Weights & Biases initialized with run name: {dataset_name}")
+        print(f"✓ Weights & Biases initialized with run name: {run_name}")
     
     # Load dataset based on config setting
     if USE_DATASET == 'huggingface':
@@ -396,7 +450,7 @@ def main():
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
 
     total_updates = ((len(train_batches) + GRADIENT_ACCUMULATION - 1) // 
-                    GRADIENT_ACCUMULATION) * EPOCHS 
+                    GRADIENT_ACCUMULATION) * epochs 
 
     scheduler = MyScheduler(
         optimizer, 
@@ -404,7 +458,46 @@ def main():
         scheduler_type='cosine',  # hoặc 'linear', 'exponential'
         warmup_ratio=WARMUP_RATIO,         # 10% đầu là warmup
         final_lr_ratio=FINAL_LR_RATIO 
-    )   
+    )
+    
+    # Load checkpoint states if resuming
+    best_val_loss = float('inf')
+    if resume_checkpoint:
+        print(f"\n{'='*60}")
+        print("LOADING CHECKPOINT STATES")
+        print(f"{'='*60}")
+        try:
+            model.load_state_dict(resume_checkpoint['model_state_dict'])
+            print("✓ Model state loaded")
+            
+            optimizer.load_state_dict(resume_checkpoint['optimizer_state_dict'])
+            print("✓ Optimizer state loaded")
+            
+            if resume_checkpoint.get('scheduler_state_dict'):
+                scheduler.load_state_dict(resume_checkpoint['scheduler_state_dict'])
+                print("✓ Scheduler state loaded")
+            
+            if 'val_loss' in resume_checkpoint:
+                best_val_loss = resume_checkpoint['val_loss']
+                print(f"✓ Best validation loss: {best_val_loss:.4f}")
+            
+            # Estimate start epoch from global steps
+            if 'epoch' in resume_checkpoint:
+                updates_per_epoch = (len(train_batches) + GRADIENT_ACCUMULATION - 1) // GRADIENT_ACCUMULATION
+                start_epoch = resume_checkpoint['epoch'] // updates_per_epoch
+                print(f"✓ Estimated starting epoch: {start_epoch + 1}")
+            
+            # Free memory
+            del resume_checkpoint
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            print("✓ Checkpoint memory freed")
+            
+        except Exception as e:
+            print(f"✗ Error loading checkpoint states: {e}")
+            print("  Starting fresh training instead")
+            start_epoch = 0
+            best_val_loss = float('inf')
 
     criterion = nn.CrossEntropyLoss(ignore_index=pad_token_id)
 
@@ -413,7 +506,7 @@ def main():
     print(f"{'='*60}")
     print(f"Device: {DEVICE}")
     print(f"Batch size: {BATCH_SIZE}")
-    print(f"Epochs: {EPOCHS}")
+    print(f"Epochs: {epochs} (starting from epoch {start_epoch + 1})")
     print(f"Learning rate: {LEARNING_RATE}")
     print(f"Scheduler: cosine with warmup")
     print(f"Total training steps: {total_updates}")
@@ -433,15 +526,20 @@ def main():
         src_tokenizer=vi_tokenizer,
         trg_tokenizer=en_tokenizer,
         test_samples=test_samples,
-        use_wandb=USE_WANDB
+        use_wandb=USE_WANDB,
+        start_epoch=start_epoch
     )
+    
+    # Set best_val_loss from checkpoint
+    if best_val_loss != float('inf'):
+        trainer.best_val_loss = best_val_loss
 
     print(f"\n{'='*60}")
     print("START TRAINING")
     print(f"{'='*60}\n")
 
     trained_model, history = trainer.train(
-        num_epochs=EPOCHS, 
+        num_epochs=epochs, 
         accumulate_steps=GRADIENT_ACCUMULATION
     )
     
