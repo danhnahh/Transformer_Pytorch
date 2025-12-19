@@ -1,8 +1,33 @@
-from peft import get_peft_model, LoraConfig, TaskType
-from transformers import AutoModelForSeq2SeqLM, Trainer, DataCollatorForSeq2Seq, \
+import os
+from datasets import concatenate_datasets
+from transformers import AutoModelForSeq2SeqLM, Seq2SeqTrainer, DataCollatorForSeq2Seq, \
     Seq2SeqTrainingArguments
+from peft import LoraConfig, get_peft_model, TaskType
 
 from load_data import get_tokenized_data, cache_path, tokenizer
+
+def preprocess_logits_for_metrics(logits, labels):
+    """Chỉ giữ argmax để tiết kiệm VRAM (thay vì giữ toàn bộ logits ~256k vocab)"""
+    if isinstance(logits, tuple):
+        logits = logits[0]
+    return logits.argmax(dim=-1)
+
+
+def compute_metrics(eval_preds):
+    preds, labels = eval_preds
+
+    # Flatten
+    preds = preds.flatten()
+    labels = labels.flatten()
+
+    # Chỉ tính accuracy trên các token không phải padding (-100)
+    mask = labels != -100
+    preds = preds[mask]
+    labels = labels[mask]
+
+    accuracy = (preds == labels).mean()
+
+    return {"accuracy": accuracy * 100}
 
 # Load mô hình
 model = AutoModelForSeq2SeqLM.from_pretrained(
@@ -11,196 +36,114 @@ model = AutoModelForSeq2SeqLM.from_pretrained(
     use_safetensors=True,
     dtype="bfloat16",
     device_map="auto",
+    # attn_implementation="flash_attention_2",
 )
 
-# LoRA config
-# peft_config = LoraConfig(
-#     task_type=TaskType.SEQ_2_SEQ_LM,
-#     r=32,
-#     lora_alpha=64,
-#     lora_dropout=0.05,
-#     bias="none",
-#     target_modules=["q_proj", "k_proj", "v_proj", "o_proj"]
-# )
-# model = get_peft_model(model, peft_config)
+# ============================================================
+# LoRA Configuration
+# ============================================================
+print("Applying LoRA...")
+lora_config = LoraConfig(
+    r=32,
+    lora_alpha=256,
+    target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+    lora_dropout=0.05,
+    bias="none",
+    task_type=TaskType.SEQ_2_SEQ_LM,
+)
 
-# Data collator
+model = get_peft_model(model, lora_config)
+
+# In trainable params
+model.print_trainable_parameters()
+
+# Data collator - KHÔNG truyền model để tránh lỗi decoder_input_ids conflict
 data_collator = DataCollatorForSeq2Seq(
     tokenizer=tokenizer,
     model=model,
     padding="longest",
-    label_pad_token_id=-100
+    label_pad_token_id=-100,
+    pad_to_multiple_of=8,
 )
 
 batch_size = 8
 gradient_accumulation_steps = 4
 
 # ============================================================
-# CHIA DATA THÀNH 3 PHẦN ĐỀU NHAU
+# LOAD DATA - CHỈ 1 CHIỀU EN -> VI
 # ============================================================
 print("=" * 60)
-print("CHUẨN BỊ DATA: Chia thành 3 phần đều nhau")
+print("LOADING DATA: EN -> VI")
 print("=" * 60)
 
-# Load data EN->VI và VI->EN
-full_data_en2vi = get_tokenized_data('train_filtered', direction="en2vi")
-full_data_vi2en = get_tokenized_data('train_filtered', direction="vi2en")
+# Load real data
+real_data = get_tokenized_data('train_filtered', direction="en2vi")
 
-# Chia EN->VI thành 2 phần (cho giai đoạn 1 và 3)
-# Phần 1: 50% đầu, Phần 3: 50% sau
-total_en2vi = len(full_data_en2vi)
-half_en2vi = total_en2vi // 2
+# Split 90/10
+split = real_data.train_test_split(test_size=0.1, seed=42)
+train_data = split['train']
+val_data = split['test']
 
-part1_en2vi = full_data_en2vi.select(range(half_en2vi))
-part3_en2vi = full_data_en2vi.select(range(half_en2vi, total_en2vi))
-
-# VI->EN dùng cho giai đoạn 2
-part2_vi2en = full_data_vi2en
-
-# Chia train/val cho từng phần (90/10)
-split1 = part1_en2vi.train_test_split(test_size=0.1, seed=42)
-train_data1 = split1['train']
-val_data1 = split1['test']
-
-split2 = part2_vi2en.train_test_split(test_size=0.1, seed=42)
-train_data2 = split2['train']
-val_data2 = split2['test']
-
-split3 = part3_en2vi.train_test_split(test_size=0.1, seed=42)
-train_data3 = split3['train']
-val_data3 = split3['test']
-
-print(f"Giai đoạn 1 (EN->VI): {len(train_data1):,} train, {len(val_data1):,} val")
-print(f"Giai đoạn 2 (VI->EN): {len(train_data2):,} train, {len(val_data2):,} val")
-print(f"Giai đoạn 3 (EN->VI): {len(train_data3):,} train, {len(val_data3):,} val")
+print(f"Train: {len(train_data):,} samples")
+print(f"Val: {len(val_data):,} samples")
 
 # ============================================================
-# GIAI ĐOẠN 1: EN -> VI (phần 1)
+# TRAINING
 # ============================================================
 print("=" * 60)
-print("GIAI ĐOẠN 1: EN -> VI")
+print("STARTING TRAINING: EN -> VI")
 print("=" * 60)
 
-training_args1 = Seq2SeqTrainingArguments(
+training_args = Seq2SeqTrainingArguments(
+    output_dir="./nllb-en2vi",
     per_device_train_batch_size=batch_size,
+    per_device_eval_batch_size=batch_size,
     gradient_accumulation_steps=gradient_accumulation_steps,
-    num_train_epochs=2,
-    learning_rate=2e-5,  # LR cao nhất cho giai đoạn đầu
+    num_train_epochs=5,
+    learning_rate=5e-4,
     weight_decay=0.005,
-    output_dir="./lora-nllb-translation/stage1",
-    logging_steps=100,
-    logging_dir="./logs/stage1",
-    save_steps=2500,
-    save_total_limit=2,
     lr_scheduler_type="cosine",
+    warmup_ratio=0.06,
     bf16=True,
     tf32=True,
-    eval_strategy="steps",
-    eval_steps=2500,
+    # label_smoothing_factor=0.1,
+    logging_steps=400,
+    logging_dir="./logs/en2vi",
     report_to="tensorboard",
-    load_best_model_at_end=True,
-    warmup_ratio=0.1,
-    metric_for_best_model="loss",
-    greater_is_better=False,
-    label_names=["labels"]
-)
-
-trainer1 = Trainer(
-    model=model,
-    args=training_args1,
-    train_dataset=train_data1,
-    eval_dataset=val_data1,
-    data_collator=data_collator,
-)
-trainer1.train()
-print("Hoàn thành giai đoạn 1!")
-
-# ============================================================
-# GIAI ĐOẠN 2: VI -> EN (phần 2)
-# ============================================================
-print("=" * 60)
-print("GIAI ĐOẠN 2: VI -> EN")
-print("=" * 60)
-
-training_args2 = Seq2SeqTrainingArguments(
-    per_device_train_batch_size=batch_size,
-    gradient_accumulation_steps=gradient_accumulation_steps,
-    num_train_epochs=2,
-    learning_rate=5e-6,  # LR giảm xuống
-    weight_decay=0.005,
-    output_dir="./lora-nllb-translation/stage2",
-    logging_steps=100,
-    logging_dir="./logs/stage2",
-    save_steps=2500,
-    save_total_limit=2,
-    lr_scheduler_type="cosine",
-    bf16=True,
-    tf32=True,
     eval_strategy="steps",
-    eval_steps=2500,
-    report_to="tensorboard",
+    eval_steps=2600,
+    save_strategy="steps",
+    save_steps=2600,
+    save_total_limit=1,
     load_best_model_at_end=True,
-    warmup_ratio=0.05,  # Warmup ít hơn vì đã pretrain
-    metric_for_best_model="loss",
-    greater_is_better=False,
-    label_names=["labels"]
+    metric_for_best_model="eval_accuracy",
+    greater_is_better=True,
+    label_names=["labels"],
 )
 
-trainer2 = Trainer(
+trainer = Seq2SeqTrainer(
     model=model,
-    args=training_args2,
-    train_dataset=train_data2,
-    eval_dataset=val_data2,
+    args=training_args,
+    train_dataset=train_data,
+    eval_dataset=val_data,
     data_collator=data_collator,
-)
-trainer2.train()
-print("Hoàn thành giai đoạn 2!")
-
-# ============================================================
-# GIAI ĐOẠN 3: EN -> VI (phần 3 - data mới)
-# ============================================================
-print("=" * 60)
-print("GIAI ĐOẠN 3: EN -> VI (Fine-tune)")
-print("=" * 60)
-
-training_args3 = Seq2SeqTrainingArguments(
-    per_device_train_batch_size=batch_size,
-    gradient_accumulation_steps=gradient_accumulation_steps,
-    num_train_epochs=2,
-    learning_rate=1e-6,  # LR thấp nhất để fine-tune
-    weight_decay=0.005,
-    output_dir="./lora-nllb-translation/stage3",
-    logging_steps=100,
-    logging_dir="./logs/stage3",
-    save_steps=2500,
-    save_total_limit=2,
-    lr_scheduler_type="cosine",
-    bf16=True,
-    tf32=True,
-    eval_strategy="steps",
-    eval_steps=2500,
-    report_to="tensorboard",
-    load_best_model_at_end=True,
-    warmup_ratio=0.03,  # Warmup rất ít
-    metric_for_best_model="loss",
-    greater_is_better=False,
-    label_names=["labels"]
+    compute_metrics=compute_metrics,
+    preprocess_logits_for_metrics=preprocess_logits_for_metrics,
 )
 
-trainer3 = Trainer(
-    model=model,
-    args=training_args3,
-    train_dataset=train_data3,  # Data EN->VI phần 3 (khác phần 1)
-    eval_dataset=val_data3,
-    data_collator=data_collator,
-)
-trainer3.train()
-print("Hoàn thành giai đoạn 3!")
+trainer.train()
 
-# Lưu model cuối cùng
-model.save_pretrained("./lora-nllb-translation/final")
-tokenizer.save_pretrained("./lora-nllb-translation/final")
+# Evaluate
 print("=" * 60)
-print("HOÀN THÀNH TRAINING 3 GIAI ĐOẠN!")
-print("Model đã lưu tại: ./lora-nllb-translation/final")
+print("EVALUATION")
+print("=" * 60)
+eval_results = trainer.evaluate()
+print(f"Eval Loss: {eval_results['eval_loss']:.4f}")
+
+# Save LoRA adapter
+model.save_pretrained("./nllb-en2vi/lora")
+tokenizer.save_pretrained("./nllb-en2vi/lora")
+
+print("=" * 60)
+print("DONE! LoRA adapter saved at: ./nllb-en2vi/lora")
 print("=" * 60)

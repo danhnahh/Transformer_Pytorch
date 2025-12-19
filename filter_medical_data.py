@@ -217,6 +217,23 @@ def is_valid_pair(en_text, vi_text, config):
     return True, "valid"
 
 
+def load_test_set(test_en_file, test_vi_file):
+    """Load test set de loai bo cac cau trung"""
+    test_en_set = set()
+    test_vi_set = set()
+
+    try:
+        with open(test_en_file, 'r', encoding='utf-8') as f:
+            test_en_set = {line.strip().lower() for line in f}
+        with open(test_vi_file, 'r', encoding='utf-8') as f:
+            test_vi_set = {line.strip().lower() for line in f}
+        print(f"Loaded test set: {len(test_en_set):,} EN, {len(test_vi_set):,} VI sentences")
+    except FileNotFoundError:
+        print("Warning: Test files not found, skipping overlap check")
+
+    return test_en_set, test_vi_set
+
+
 def filter_data(en_file, vi_file, output_prefix, config):
     """Loc du lieu va luu ket qua"""
 
@@ -232,6 +249,11 @@ def filter_data(en_file, vi_file, output_prefix, config):
 
     print(f"Total original pairs: {len(en_lines):,}")
 
+    # Load test set de loai bo overlap
+    test_en_set, test_vi_set = set(), set()
+    if config.get('test_en_file') and config.get('test_vi_file'):
+        test_en_set, test_vi_set = load_test_set(config['test_en_file'], config['test_vi_file'])
+
     # Thong ke
     stats = defaultdict(int)
     valid_pairs = []
@@ -239,6 +261,12 @@ def filter_data(en_file, vi_file, output_prefix, config):
 
     print("Filtering data...")
     for en, vi in tqdm(zip(en_lines, vi_lines), total=len(en_lines)):
+        # Kiem tra trung voi test set
+        en_lower = en.lower().strip()
+        vi_lower = vi.lower().strip()
+        if en_lower in test_en_set or vi_lower in test_vi_set:
+            stats['overlap_with_test'] += 1
+            continue
         # Kiem tra trung lap
         pair_key = (en.lower().strip(), vi.lower().strip())
         if pair_key in seen_pairs:
@@ -263,13 +291,75 @@ def filter_data(en_file, vi_file, output_prefix, config):
         else:
             stats[reason] += 1
 
-    # Sap xep: uu tien cau co tu khoa y te len truoc
-    if config['prioritize_medical']:
-        valid_pairs.sort(key=lambda x: (not x[2], len(x[0])))
-
-    # Gioi han so luong neu can
+    # Stratified sampling theo do dai de phan bo deu
     if config['max_samples'] and len(valid_pairs) > config['max_samples']:
-        valid_pairs = valid_pairs[:config['max_samples']]
+        import random
+        random.seed(42)
+
+        # Chia thanh 2 nhom: co va khong co tu khoa y te
+        medical_pairs = [p for p in valid_pairs if p[2]]
+        non_medical_pairs = [p for p in valid_pairs if not p[2]]
+
+        def stratified_sample(pairs, n_samples):
+            """Lay mau phan tang theo do dai"""
+            if len(pairs) <= n_samples:
+                return pairs
+
+            # Chia thanh cac bins theo do dai (so tu)
+            bins = defaultdict(list)
+            for p in pairs:
+                word_count = count_words(p[0])
+                # Bins: 5-10, 11-20, 21-40, 41-80, 81+
+                if word_count <= 10:
+                    bin_id = 0
+                elif word_count <= 20:
+                    bin_id = 1
+                elif word_count <= 40:
+                    bin_id = 2
+                elif word_count <= 80:
+                    bin_id = 3
+                else:
+                    bin_id = 4
+                bins[bin_id].append(p)
+
+            # Lay deu tu moi bin
+            result = []
+            samples_per_bin = n_samples // len(bins)
+
+            for bin_id in sorted(bins.keys()):
+                bin_pairs = bins[bin_id]
+                random.shuffle(bin_pairs)
+                n_take = min(len(bin_pairs), samples_per_bin)
+                result.extend(bin_pairs[:n_take])
+
+            # Neu chua du, lay them tu cac bins con du
+            remaining = n_samples - len(result)
+            if remaining > 0:
+                leftover = []
+                for bin_id in sorted(bins.keys()):
+                    bin_pairs = bins[bin_id]
+                    n_taken = min(len(bin_pairs), samples_per_bin)
+                    leftover.extend(bin_pairs[n_taken:])
+                random.shuffle(leftover)
+                result.extend(leftover[:remaining])
+
+            return result
+
+        # Uu tien medical truoc
+        if config['prioritize_medical']:
+            # Lay toi da 70% la medical, 30% la non-medical
+            n_medical = min(len(medical_pairs), int(config['max_samples'] * 0.7))
+            n_non_medical = config['max_samples'] - n_medical
+
+            sampled_medical = stratified_sample(medical_pairs, n_medical)
+            sampled_non_medical = stratified_sample(non_medical_pairs, n_non_medical)
+
+            valid_pairs = sampled_medical + sampled_non_medical
+        else:
+            valid_pairs = stratified_sample(valid_pairs, config['max_samples'])
+
+        # Shuffle lai de tron deu
+        random.shuffle(valid_pairs)
 
     # Luu ket qua
     output_en = f"{output_prefix}.en.txt"
@@ -301,6 +391,7 @@ def filter_data(en_file, vi_file, output_prefix, config):
     print(f"  - No Vietnamese chars: {stats['no_vietnamese']:,}")
     print(f"  - No medical keywords: {stats['no_medical_keyword']:,}")
     print(f"  - Empty: {stats['empty']:,}")
+    print(f"  - Overlap with test: {stats['overlap_with_test']:,}")
     print(f"\nFinal result: {len(valid_pairs):,} pairs")
     print(f"Retention rate: {len(valid_pairs)/len(en_lines)*100:.1f}%")
 
@@ -331,6 +422,12 @@ def main():
                         help='Prioritize sentences with medical keywords')
     parser.add_argument('--max_samples', type=int, default=None,
                         help='Maximum samples (None = unlimited)')
+    parser.add_argument('--test_en_file', type=str, default='data/VLSP_MT_dataset/test.en.txt',
+                        help='Test English file (to remove overlap)')
+    parser.add_argument('--test_vi_file', type=str, default='data/VLSP_MT_dataset/test.vi.txt',
+                        help='Test Vietnamese file (to remove overlap)')
+    parser.add_argument('--no_test_filter', action='store_true',
+                        help='Disable filtering overlap with test set')
 
     args = parser.parse_args()
 
@@ -343,6 +440,8 @@ def main():
         'min_medical_keywords': args.min_medical_keywords,
         'prioritize_medical': args.prioritize_medical,
         'max_samples': args.max_samples,
+        'test_en_file': None if args.no_test_filter else args.test_en_file,
+        'test_vi_file': None if args.no_test_filter else args.test_vi_file,
     }
 
     filter_data(args.en_file, args.vi_file, args.output_prefix, config)
