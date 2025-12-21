@@ -5,6 +5,7 @@ from tqdm import tqdm
 from peft import PeftModel
 from transformers import AutoModelForSeq2SeqLM, DataCollatorForSeq2Seq
 from torch.utils.data import DataLoader
+from evaluate import load as load_metric
 
 from load_data import cache_path, get_tokenized_data, tokenizer
 
@@ -74,13 +75,40 @@ def compute_bleu(model, tokenizer, test_dataset, batch_size=8):
         for line in references:
             f_ref.write(line + "\n")
 
-    result = sacrebleu.corpus_bleu(
+    # BLEU score
+    bleu_result = sacrebleu.corpus_bleu(
         predictions,
         [references],
         lowercase=True,
         tokenize="13a",
     )
-    return {"score": result.score, "n_samples": len(predictions)}
+
+    # TER score
+    ter_result = sacrebleu.corpus_ter(
+        predictions,
+        [references],
+    )
+
+    # METEOR score
+    meteor_metric = load_metric("meteor")
+    meteor_result = meteor_metric.compute(
+        predictions=predictions,
+        references=references,
+    )
+
+    # chrF score
+    chrf_result = sacrebleu.corpus_chrf(
+        predictions,
+        [references],
+    )
+
+    return {
+        "bleu": bleu_result.score,
+        "ter": ter_result.score,
+        "meteor": meteor_result["meteor"] * 100,
+        "chrf": chrf_result.score,
+        "n_samples": len(predictions),
+    }
 
 if __name__ == '__main__':
     import argparse
@@ -102,11 +130,10 @@ if __name__ == '__main__':
         torch_dtype=torch.bfloat16,
         use_safetensors=True,
         device_map="auto",
-        attn_implementation="flash_attention_2",
     )
 
     print(f"Loading LoRA adapter from {args.lora_path}...")
-    # model = PeftModel.from_pretrained(model, args.lora_path)
+    model = PeftModel.from_pretrained(model, args.lora_path)
 
     print(f"Loading test data: {args.test_file}...")
     test_data = get_tokenized_data(args.test_file, direction="en2vi")
@@ -115,6 +142,11 @@ if __name__ == '__main__':
     result = compute_bleu(model, tokenizer, test_data, batch_size=args.batch_size)
 
     print("=" * 60)
-    print(f"sacreBLEU score: {result['score']:.2f}")
-    print(f"Number of samples: {result['n_samples']:,}")
+    print("EVALUATION RESULTS")
+    print("=" * 60)
+    print(f"BLEU:   {result['bleu']:.2f}")
+    print(f"TER:    {result['ter']:.2f} (lower is better)")
+    print(f"METEOR: {result['meteor']:.2f}")
+    print(f"chrF:   {result['chrf']:.2f}")
+    print(f"Samples: {result['n_samples']:,}")
     print("=" * 60)

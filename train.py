@@ -1,7 +1,7 @@
 import os
 from datasets import concatenate_datasets
 from transformers import AutoModelForSeq2SeqLM, Seq2SeqTrainer, DataCollatorForSeq2Seq, \
-    Seq2SeqTrainingArguments
+    Seq2SeqTrainingArguments, get_cosine_with_min_lr_schedule_with_warmup
 from peft import LoraConfig, get_peft_model, TaskType
 
 from load_data import get_tokenized_data, cache_path, tokenizer
@@ -36,7 +36,6 @@ model = AutoModelForSeq2SeqLM.from_pretrained(
     use_safetensors=True,
     dtype="bfloat16",
     device_map="auto",
-    # attn_implementation="flash_attention_2",
 )
 
 # ============================================================
@@ -45,8 +44,8 @@ model = AutoModelForSeq2SeqLM.from_pretrained(
 print("Applying LoRA...")
 lora_config = LoraConfig(
     r=32,
-    lora_alpha=256,
-    target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+    lora_alpha=128,
+    target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "fc1", "fc2"],
     lora_dropout=0.05,
     bias="none",
     task_type=TaskType.SEQ_2_SEQ_LM,
@@ -103,10 +102,9 @@ training_args = Seq2SeqTrainingArguments(
     learning_rate=5e-4,
     weight_decay=0.005,
     lr_scheduler_type="cosine",
-    warmup_ratio=0.06,
+    warmup_ratio=0.1,
     bf16=True,
     tf32=True,
-    # label_smoothing_factor=0.1,
     logging_steps=400,
     logging_dir="./logs/en2vi",
     report_to="tensorboard",
