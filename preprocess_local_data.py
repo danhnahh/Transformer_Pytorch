@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-Preprocess local IWSLT'15 dataset to clean HTML entities.
-This script replaces HTML entities like &apos; &quot; &amp; etc. with their actual characters.
+Preprocess local IWSLT'15 dataset to clean HTML entities and fix spacing.
+This script:
+1. Replaces HTML entities like &apos; &quot; &amp; etc. with their actual characters
+2. Fixes unnecessary spaces before punctuation marks
 """
 
 import html
 import os
+import re
 from pathlib import Path
 
 
@@ -26,9 +29,46 @@ def clean_html_entities(text):
     return text
 
 
+def fix_punctuation_spacing(text):
+    """Remove unnecessary spaces before punctuation marks and inside quotes."""
+    # Remove space before common punctuation marks
+    # Handles: comma, period, semicolon, colon, exclamation, question mark, closing brackets
+    text = re.sub(r'\s+([,.:;!?)\]}])', r'\1', text)
+    
+    # Remove space before apostrophes that are part of contractions (e.g., "don 't" -> "don't")
+    text = re.sub(r'\s+\'(\w)', r"'\1", text)
+    
+    # Fix spaces around dashes and hyphens (multiple spaces to single space)
+    text = re.sub(r'\s*(--)\s*', r' \1 ', text)
+    
+    # Fix spaces inside quotation marks: " text " -> "text"
+    # Handle double quotes
+    text = re.sub(r'"\s+', r'"', text)  # Remove space after opening quote
+    text = re.sub(r'\s+"', r'"', text)  # Remove space before closing quote
+    
+    # Handle single quotes (be careful not to affect contractions)
+    text = re.sub(r"'\s+(\w)", r"'\1", text)  # Remove space after opening single quote before word
+    text = re.sub(r'(\w)\s+\'', r"\1'", text)  # Remove space before closing single quote after word
+    
+    # Remove multiple spaces
+    text = re.sub(r'\s+', ' ', text)
+    
+    # Clean up leading/trailing whitespace
+    text = text.strip()
+    
+    return text
+
+
+def clean_text(text):
+    """Apply all text cleaning operations."""
+    text = clean_html_entities(text)
+    text = fix_punctuation_spacing(text)
+    return text
+
+
 def process_file(input_path, output_path=None, backup=True):
     """
-    Process a single file to clean HTML entities.
+    Process a single file to clean HTML entities and fix spacing.
     
     Args:
         input_path: Path to input file
@@ -59,8 +99,9 @@ def process_file(input_path, output_path=None, backup=True):
     with open(input_path, 'r', encoding='utf-8') as f:
         lines = f.readlines()
     
-    # Count entities before cleaning
+    # Count issues before cleaning
     entities_count = 0
+    spacing_issues = 0
     for line in lines:
         entities_count += line.count('&apos;')
         entities_count += line.count('&quot;')
@@ -69,12 +110,18 @@ def process_file(input_path, output_path=None, backup=True):
         entities_count += line.count('&#93;')
         entities_count += line.count('&lt;')
         entities_count += line.count('&gt;')
+        
+        # Count spacing issues (space before punctuation)
+        spacing_issues += len(re.findall(r'\s+[,.:;!?)\]}]', line))
+        spacing_issues += len(re.findall(r'\s+\'', line))
     
     if entities_count > 0:
         print(f"  Found {entities_count} HTML entities")
+    if spacing_issues > 0:
+        print(f"  Found {spacing_issues} spacing issues")
     
     # Clean the lines
-    cleaned_lines = [clean_html_entities(line) for line in lines]
+    cleaned_lines = [clean_text(line) + '\n' if not line.endswith('\n') else clean_text(line.rstrip('\n')) + '\n' for line in lines]
     
     # Write cleaned content
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -82,7 +129,7 @@ def process_file(input_path, output_path=None, backup=True):
         f.writelines(cleaned_lines)
     
     print(f"  Cleaned and saved to: {output_path}")
-    return entities_count
+    return entities_count, spacing_issues
 
 
 def main():
@@ -104,42 +151,53 @@ def main():
     ]
     
     total_entities = 0
+    total_spacing = 0
     processed_files = 0
     
-    print("=" * 60)
-    print("Preprocessing IWSLT'15 Dataset - Cleaning HTML Entities")
-    print("=" * 60)
+    print("=" * 70)
+    print("Preprocessing IWSLT'15 Dataset")
+    print("- Cleaning HTML Entities")
+    print("- Fixing Punctuation Spacing")
+    print("=" * 70)
     print()
     
     for filename in files_to_process:
         file_path = data_dir / filename
         if file_path.exists():
-            entities = process_file(file_path, backup=True)
+            entities, spacing = process_file(file_path, backup=True)
             total_entities += entities
+            total_spacing += spacing
             processed_files += 1
             print()
         else:
             print(f"Warning: File not found: {file_path}")
             print()
     
-    print("=" * 60)
+    print("=" * 70)
     print(f"Preprocessing Complete!")
     print(f"  Files processed: {processed_files}")
     print(f"  Total HTML entities cleaned: {total_entities}")
+    print(f"  Total spacing issues fixed: {total_spacing}")
     print(f"  Backups saved with .bak extension")
-    print("=" * 60)
+    print("=" * 70)
     
     # Show some examples
-    if total_entities > 0:
+    if total_entities > 0 or total_spacing > 0:
         print()
-        print("Common replacements made:")
-        print("  &apos;  →  '")
-        print("  &quot;  →  \"")
-        print("  &amp;   →  &")
-        print("  &#91;   →  [")
-        print("  &#93;   →  ]")
-        print("  &lt;    →  <")
-        print("  &gt;    →  >")
+        print("Transformations applied:")
+        if total_entities > 0:
+            print("  1. HTML entities:")
+            print("     &apos;  →  '")
+            print("     &quot;  →  \"")
+            print("     &amp;   →  &")
+            print("     &#91;   →  [")
+            print("     &#93;   →  ]")
+        if total_spacing > 0:
+            print("  2. Punctuation spacing:")
+            print("     'text , word'  →  'text, word'")
+            print("     'word .'       →  'word.'")
+            print("     'don 't'       →  'don't'")
+            print("     'word : next'  →  'word: next'")
 
 
 if __name__ == "__main__":

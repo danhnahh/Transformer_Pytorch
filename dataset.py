@@ -2,7 +2,6 @@ import os
 import re
 import unicodedata
 import sentencepiece as spm
-from pyvi.ViTokenizer import ViTokenizer
 from datasets import load_dataset
 from config import *
 
